@@ -1,0 +1,44 @@
+databases:
+  - name: stop-loss-trading-db
+    plan: free
+    databaseName: trading
+    user: trading
+
+services:
+  - type: web
+    name: stop-loss-trading-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter # NOT free - free tier sleeps on idle, which would pause the scheduler and stop autonomous trading
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: stop-loss-trading-db
+          property: connectionString
+      - key: BROKER_PROVIDER
+        value: simulator
+      - key: MARKET_DATA_PROVIDER
+        value: yfinance
+      - key: ACCOUNT_STARTING_CAPITAL
+        value: "100000"
+      - key: BASIC_AUTH_USERNAME
+        sync: false # set manually in the Render dashboard, not committed to git
+      - key: BASIC_AUTH_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://stop-loss-trading-frontend.onrender.com
+
+  - type: web
+    name: stop-loss-trading-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://stop-loss-trading-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
