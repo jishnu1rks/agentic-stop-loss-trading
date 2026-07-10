@@ -187,3 +187,4 @@ Section 9: once Phase 2 (live Kite Connect) is wired up, this system
 executes real trades with real capital. It is not financial advice, and
 stop-loss orders do not guarantee execution at the exact trigger price
 (slippage risk, especially in volatile/illiquid stocks).
+# agentic-stop-loss-trading
