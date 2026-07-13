@@ -151,26 +151,56 @@ one instance of the backend against the same database.
 1. Push this repo to GitHub.
 2. In Render: **New → Blueprint**, point it at the repo. It reads
    `render.yaml` and creates the backend web service, a Postgres
-   database, and the frontend static site together.
+   database, and the frontend static site together (currently configured
+   on Render's **free** tier - see the caveats below and upgrade to a
+   paid always-on plan for real production use, not just a client demo).
 3. On the backend service, set `BASIC_AUTH_USERNAME` and
    `BASIC_AUTH_PASSWORD` in the Render dashboard (deliberately not in
    `render.yaml`/git - see `sync: false`).
-4. Confirm the backend service's plan is **not** the free tier (it
-   sleeps on idle - see above).
-5. Once both services are live, update `CORS_ORIGINS` on the backend and
+4. Once both services are live, update `CORS_ORIGINS` on the backend and
    `VITE_API_BASE_URL` on the frontend to each other's actual Render
    URLs if they differ from the `render.yaml` defaults, and redeploy.
-6. Visit the frontend URL, log in with the credentials from step 3, and
+5. Visit the frontend URL, log in with the credentials from step 3, and
    `python -m app.seed` (via Render's shell) or the Agent Settings page
    to configure agents - a fresh Postgres database starts with none.
+
+### Free hosting for a demo
+
+`render.yaml` defaults to Render's **free** tier for the backend, which
+is a real product tradeoff, not just "the same thing but slower":
+
+- **The instance sleeps after 15 minutes with no HTTP traffic**, and
+  since APScheduler runs in-process, **the scheduler stops firing while
+  asleep** - agents don't scan autonomously unless something is actively
+  hitting the site. The next visit wakes it with a ~30-50s cold start.
+- **Fix, still free**: point an external uptime pinger (e.g.
+  [UptimeRobot](https://uptimerobot.com) or
+  [cron-job.org](https://cron-job.org), both free) at
+  `https://<your-backend>.onrender.com/health` every 5-10 minutes. This
+  keeps the instance continuously awake, so the scheduler actually runs
+  autonomously - and a single service pinged this way stays within
+  Render's free 750 instance-hours/month (≈ one service running 24/7 for
+  a 30-day month), so this costs nothing extra.
+- **Render's free Postgres has historically had a retention/expiration
+  window** (check Render's current terms) - fine for a short client demo,
+  risky if it needs to run for weeks. If that matters, swap in
+  [Neon](https://neon.tech) (generous free tier, no forced deletion,
+  auto-suspends but keeps data) instead of the Render-managed database:
+  create a Neon project, copy its connection string, and set it as
+  `DATABASE_URL` directly on the Render backend service instead of using
+  `fromDatabase` in `render.yaml`.
+- The single-worker constraint above still applies on free tier too -
+  Render's free plan is one instance anyway, so this isn't an extra risk.
 
 ### Deploying elsewhere (Railway, Fly.io, your own VM)
 
 The same three pieces apply regardless of platform: build
-`backend/Dockerfile` as an always-on single-instance service, provision
-Postgres and set `DATABASE_URL`, and serve `frontend/dist` as a static
-site with `VITE_API_BASE_URL` pointed at the backend. Set
+`backend/Dockerfile` as a single-instance service, provision Postgres and
+set `DATABASE_URL`, and serve `frontend/dist` as a static site with
+`VITE_API_BASE_URL` pointed at the backend. Set
 `BASIC_AUTH_USERNAME`/`BASIC_AUTH_PASSWORD`/`CORS_ORIGINS` the same way.
+Railway and Fly.io both have free/hobby tiers with similar sleep-on-idle
+tradeoffs to Render's - the keep-alive-ping trick above applies there too.
 
 ## Known limitation
 

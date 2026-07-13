@@ -10,7 +10,7 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter # NOT free - free tier sleeps on idle, which would pause the scheduler and stop autonomous trading
+    plan: free # sleeps after 15min idle - pair with an external keep-alive ping (see README "Free hosting for a demo")
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
