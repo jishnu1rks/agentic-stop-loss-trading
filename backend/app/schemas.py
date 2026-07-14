@@ -82,3 +82,9 @@ class ManualTradeIn(BaseModel):
     quantity: int = Field(gt=0)
     stop_loss_pct: float | None = None
     target_pct: float | None = None
+
+
+class ModifyProtectionIn(BaseModel):
+    """Edit the stop-loss / target price levels on an open position."""
+    stop_loss_price: float = Field(gt=0)
+    target_price: float | None = Field(default=None, gt=0)

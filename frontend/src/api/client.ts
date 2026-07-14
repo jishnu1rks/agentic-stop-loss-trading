@@ -1,5 +1,14 @@
 import axios from "axios";
-import type { Agent, AgentBreakdown, AgentConfigIn, Kpis, ManualTradeInput, Recommendation, Trade } from "./types";
+import type {
+  Agent,
+  AgentBreakdown,
+  AgentConfigIn,
+  Kpis,
+  ManualTradeInput,
+  OpenPositionPnl,
+  Recommendation,
+  Trade,
+} from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const AUTH_STORAGE_KEY = "basic_auth_credentials";
@@ -64,10 +73,13 @@ export const api = {
 
   listTrades: (params?: Record<string, string | boolean | undefined>) =>
     client.get<Trade[]>("/trades", { params }).then((r) => r.data),
+  openPositionsPnl: () => client.get<Record<string, OpenPositionPnl>>("/trades/open/pnl").then((r) => r.data),
   placeManualTrade: (payload: ManualTradeInput) =>
     client.post<Trade>("/trades/manual", payload).then((r) => r.data),
   closeTrade: (tradeId: string) =>
     client.post<Trade>(`/trades/${tradeId}/close`).then((r) => r.data),
+  editProtection: (tradeId: string, payload: { stop_loss_price: number; target_price: number | null }) =>
+    client.patch<Trade>(`/trades/${tradeId}/protection`, payload).then((r) => r.data),
 
   kpis: () => client.get<Kpis>("/dashboard/kpis").then((r) => r.data),
 };

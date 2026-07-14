@@ -106,6 +106,77 @@ def get_capital_summary(db: Session) -> dict:
     }
 
 
+def get_open_positions_pnl(db: Session) -> dict[str, dict]:
+    """Live mark-to-market for every open trade: current price, unrealized
+    P&L (before charges/tax - those only get finalized on exit, see
+    close_trade), a 0-100 "heading" score showing where the current price
+    sits between the stop-loss and target (0 = at stop-loss, 100 = at
+    target), and a trailing-stop-loss reference value. Keyed by trade_id so
+    the frontend can merge it onto the trade rows it already has, rather
+    than a duplicate trade listing. Best-effort per symbol - a quote that
+    fails to fetch just leaves that trade out of the result rather than
+    failing the batch."""
+    open_trades = db.query(Trade).filter(Trade.status == "open").all()
+    if not open_trades:
+        return {}
+
+    symbols = list({t.stock_symbol for t in open_trades})
+    try:
+        snapshot = get_market_data_adapter().get_snapshot(symbols, lookback_days=1)
+    except MarketDataUnavailableError:
+        return {}
+
+    result: dict[str, dict] = {}
+    for trade in open_trades:
+        price = snapshot.prices.get(trade.stock_symbol)
+        if price is None:
+            continue
+
+        if trade.direction == "buy":
+            unrealized_pnl = (price - trade.buy_price) * trade.quantity
+        else:
+            unrealized_pnl = (trade.buy_price - price) * trade.quantity
+        unrealized_pnl_pct = round(unrealized_pnl / (trade.buy_price * trade.quantity) * 100, 2)
+
+        heading_pct = None
+        if trade.target_price:
+            span = (
+                trade.target_price - trade.stop_loss_price
+                if trade.direction == "buy"
+                else trade.stop_loss_price - trade.target_price
+            )
+            if span != 0:
+                progress = (
+                    (price - trade.stop_loss_price) / span
+                    if trade.direction == "buy"
+                    else (trade.stop_loss_price - price) / span
+                )
+                heading_pct = round(min(100.0, max(0.0, progress * 100)), 1)
+
+        # Display-only reference value - NOT wired to the actual GTT, which
+        # still exits at the original fixed stop_loss_price. This just
+        # shows what a trailing stop (same % distance as the original
+        # stop-loss, but measured from the current price) would be if price
+        # has moved favorably enough to make it tighter than the original.
+        # It only ever ratchets in the trade's favor, never loosens past
+        # the original stop.
+        if trade.direction == "buy":
+            trailing_candidate = price * (1 - trade.stop_loss_pct / 100)
+            trailing_stop_loss = round(max(trade.stop_loss_price, trailing_candidate), 2)
+        else:
+            trailing_candidate = price * (1 + trade.stop_loss_pct / 100)
+            trailing_stop_loss = round(min(trade.stop_loss_price, trailing_candidate), 2)
+
+        result[trade.trade_id] = {
+            "current_price": round(price, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "heading_pct": heading_pct,
+            "trailing_stop_loss": trailing_stop_loss,
+        }
+    return result
+
+
 def _band_proximity_pct(price: float, low: float, high: float) -> float:
     """How close price is to entering [low, high], as a 0-100 score. This is
     a plain distance heuristic, not a technical/predictive confidence score -
@@ -366,6 +437,69 @@ def close_trade(db: Session, trade: Trade, sell_price: float, sell_time, exit_re
     trade.net_profit = round(gross - charge_breakdown.total - tax, 2)
     trade.status = "closed"
     db.commit()
+
+
+def modify_protection(
+    db: Session,
+    trade: Trade,
+    new_stop_loss_price: float,
+    new_target_price: float | None,
+) -> Trade:
+    """Re-place the GTT bracket on an OPEN position with edited stop-loss /
+    target levels (Section 4 'Protect'). Kite exposes a GTT modify; here we
+    cancel-and-replace, same net effect. Uses a fresh client_order_id each
+    time because place_gtt is idempotent on that id - reusing the old one
+    would just return the now-cancelled GTT instead of arming a new one.
+    Recomputes the stored pct from buy_price so downstream displays (TSL,
+    etc.) stay consistent."""
+    if trade.status != "open":
+        raise ValueError("Only open trades can be modified")
+
+    broker = get_broker_adapter()
+    exit_dir = exit_direction(trade.direction)
+
+    # --- stop-loss (always present) ---
+    if trade.stop_loss_gtt_id:
+        broker.cancel_gtt(trade.stop_loss_gtt_id)
+    sl_gtt = broker.place_gtt(
+        client_order_id=f"{trade.trade_id}:sl:{uuid.uuid4().hex[:8]}",
+        symbol=trade.stock_symbol,
+        direction=exit_dir,
+        trigger_price=round(new_stop_loss_price, 2),
+        comparator="lte" if trade.direction == "buy" else "gte",
+        quantity=trade.quantity,
+        kind="stop_loss",
+    )
+    trade.stop_loss_price = round(new_stop_loss_price, 2)
+    trade.stop_loss_gtt_id = sl_gtt.gtt_id
+    if trade.buy_price:
+        trade.stop_loss_pct = round(abs(new_stop_loss_price - trade.buy_price) / trade.buy_price * 100, 4)
+
+    # --- target (optional - clearing it removes the take-profit leg) ---
+    if trade.target_gtt_id:
+        broker.cancel_gtt(trade.target_gtt_id)
+        trade.target_gtt_id = None
+    if new_target_price is not None:
+        tp_gtt = broker.place_gtt(
+            client_order_id=f"{trade.trade_id}:tp:{uuid.uuid4().hex[:8]}",
+            symbol=trade.stock_symbol,
+            direction=exit_dir,
+            trigger_price=round(new_target_price, 2),
+            comparator="gte" if trade.direction == "buy" else "lte",
+            quantity=trade.quantity,
+            kind="target",
+        )
+        trade.target_price = round(new_target_price, 2)
+        trade.target_gtt_id = tp_gtt.gtt_id
+        if trade.buy_price:
+            trade.target_pct = round(abs(new_target_price - trade.buy_price) / trade.buy_price * 100, 4)
+    else:
+        trade.target_price = None
+        trade.target_pct = None
+
+    db.commit()
+    db.refresh(trade)
+    return trade
 
 
 def run_agent_scan(db: Session, agent: Agent) -> None:

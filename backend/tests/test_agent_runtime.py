@@ -5,6 +5,8 @@ from app.agent_runtime import (
     close_trade_manually,
     enter_position,
     get_capital_summary,
+    get_open_positions_pnl,
+    modify_protection,
     monitor_open_positions,
     run_agent_scan,
     stop_loss_price,
@@ -419,3 +421,167 @@ def test_agent_scan_commits_no_signal_logs_even_with_zero_signals(monkeypatch, t
         assert no_signal_log.symbol == "FOO"
     finally:
         verifier_session.close()
+
+
+# ---- Unrealized P&L for open positions ----
+
+def test_unrealized_pnl_positive_for_buy_when_price_rises(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 105.0}))
+
+    pnl = get_open_positions_pnl(db_session)
+
+    assert pnl[trade.trade_id]["current_price"] == 105.0
+    assert pnl[trade.trade_id]["unrealized_pnl"] == 50.0  # (105-100)*10
+    assert pnl[trade.trade_id]["unrealized_pnl_pct"] == 5.0
+
+
+def test_unrealized_pnl_positive_for_short_when_price_falls(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="sell", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 95.0}))
+
+    pnl = get_open_positions_pnl(db_session)
+
+    assert pnl[trade.trade_id]["unrealized_pnl"] == 50.0  # (100-95)*10
+
+
+def test_heading_pct_midpoint_between_stop_loss_and_target(db_session, monkeypatch):
+    # buy at 100, stop-loss 10% -> 90, target 10% -> 110
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["heading_pct"] == 50.0
+
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 90.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["heading_pct"] == 0.0
+
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 110.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["heading_pct"] == 100.0
+
+
+def test_heading_pct_none_when_no_target_configured(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
+    )
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
+
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["heading_pct"] is None
+
+
+def test_trailing_stop_loss_ratchets_up_when_price_rises_for_buy(db_session, monkeypatch):
+    # buy at 100, stop-loss 10% -> fixed stop stays at 90.
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
+    )
+    assert trade.stop_loss_price == 90.0
+
+    # Price hasn't moved - trailing candidate (100*0.9=90) ties the fixed stop.
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 90.0
+
+    # Price rises to 150 - trailing candidate is 150*0.9=135, tighter than the fixed 90 -> ratchets up.
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 150.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 135.0
+
+
+def test_trailing_stop_loss_never_loosens_past_original_for_buy(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
+    )
+    # Price drops to 95 - trailing candidate (95*0.9=85.5) is looser than the fixed stop (90) - stays at 90.
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 95.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 90.0
+
+
+def test_trailing_stop_loss_ratchets_down_when_price_falls_for_short(db_session, monkeypatch):
+    # sell at 100, stop-loss 10% -> fixed stop stays at 110.
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="sell", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
+    )
+    assert trade.stop_loss_price == 110.0
+
+    # Price falls to 80 - trailing candidate is 80*1.1=88, tighter than fixed 110 -> ratchets down.
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 80.0}))
+    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 88.0
+
+
+def test_open_positions_pnl_empty_when_no_open_trades(db_session):
+    assert get_open_positions_pnl(db_session) == {}
+
+
+def test_open_positions_pnl_omits_trade_with_unavailable_price(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({}))
+
+    assert trade.trade_id not in get_open_positions_pnl(db_session)
+
+
+# ---- Editing stop-loss / target on an open position ----
+
+def test_modify_protection_updates_trade_levels(db_session):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    assert trade.stop_loss_price == 90.0
+    assert trade.target_price == 110.0
+
+    modify_protection(db_session, trade, new_stop_loss_price=95.0, new_target_price=120.0)
+
+    db_session.refresh(trade)
+    assert trade.stop_loss_price == 95.0
+    assert trade.target_price == 120.0
+    # pct is recomputed off the entry price so downstream displays stay right
+    assert trade.stop_loss_pct == 5.0
+    assert trade.target_pct == 20.0
+
+
+def test_modify_protection_rearms_gtt_at_new_level(db_session, monkeypatch):
+    # Original SL is 90; move it up to 96. A price of 95 should now trigger
+    # the new stop-loss even though it wouldn't have touched the old one.
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    modify_protection(db_session, trade, new_stop_loss_price=96.0, new_target_price=110.0)
+
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 95.0}))
+    monitor_open_positions(db_session)
+
+    db_session.refresh(trade)
+    assert trade.status == "closed"
+    assert trade.exit_reason == "stop_loss"
+
+
+def test_modify_protection_can_remove_target(db_session, monkeypatch):
+    trade = enter_position(
+        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
+        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=10, is_manual=True,
+    )
+    modify_protection(db_session, trade, new_stop_loss_price=90.0, new_target_price=None)
+
+    db_session.refresh(trade)
+    assert trade.target_price is None
+    assert trade.target_gtt_id is None
+
+    # Price rising to the old target (110) must NOT close it any more.
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 111.0}))
+    monitor_open_positions(db_session)
+    db_session.refresh(trade)
+    assert trade.status == "open"

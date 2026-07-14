@@ -25,6 +25,16 @@ export interface Trade {
   is_manual: boolean;
 }
 
+export interface OpenPositionPnl {
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  heading_pct: number | null; // 0-100 position between stop-loss (0) and target (100), null if no target set
+  // Display-only reference value - NOT the trade's actual exit price. The
+  // real GTT still exits at the trade's fixed stop_loss_price.
+  trailing_stop_loss: number;
+}
+
 export interface AgentRiskConfig {
   buy_stop_loss_pct: number;
   sell_stop_loss_pct: number;

@@ -176,9 +176,16 @@ is a real product tradeoff, not just "the same thing but slower":
 - **Fix, still free**: point an external uptime pinger (e.g.
   [UptimeRobot](https://uptimerobot.com) or
   [cron-job.org](https://cron-job.org), both free) at
-  `https://<your-backend>.onrender.com/health` every 5-10 minutes. This
-  keeps the instance continuously awake, so the scheduler actually runs
-  autonomously - and a single service pinged this way stays within
+  `POST https://<your-backend>.onrender.com/cron/tick` every 5-10 minutes,
+  **not** `/health`. `/cron/tick` runs one real scan-and-monitor cycle
+  synchronously in the request itself (live yfinance fetch, GTT checks,
+  entries/exits) - so the ping directly *causes* trading activity, instead
+  of just keeping the process awake and hoping APScheduler's internal
+  timer happens to fire in that window. It needs the same Basic Auth
+  credentials as everything else (most pingers, including UptimeRobot's
+  free HTTP monitor, support Basic Auth on the target URL) - `/health`
+  stays the one unauthenticated endpoint, kept purely for load-balancer/
+  platform health checks. A single service pinged this way stays within
   Render's free 750 instance-hours/month (≈ one service running 24/7 for
   a 30-day month), so this costs nothing extra.
 - **Render's free Postgres has historically had a retention/expiration

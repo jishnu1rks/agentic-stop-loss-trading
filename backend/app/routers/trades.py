@@ -5,10 +5,16 @@ from sqlalchemy.orm import Session
 
 from app.adapters.market_data import get_market_data_adapter
 from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
-from app.agent_runtime import close_trade_manually, enter_position, get_capital_summary
+from app.agent_runtime import (
+    close_trade_manually,
+    enter_position,
+    get_capital_summary,
+    get_open_positions_pnl,
+    modify_protection,
+)
 from app.db import get_db
 from app.models import Trade
-from app.schemas import ManualTradeIn, TradeOut
+from app.schemas import ManualTradeIn, ModifyProtectionIn, TradeOut
 
 router = APIRouter(prefix="/trades", tags=["trades"])
 
@@ -34,6 +40,14 @@ def list_trades(
     if is_manual is not None:
         query = query.filter(Trade.is_manual == is_manual)
     return query.order_by(Trade.purchase_date.desc()).all()
+
+
+@router.get("/open/pnl")
+def open_positions_pnl(db: Session = Depends(get_db)):
+    """Live mark-to-market for every open trade, keyed by trade_id - see
+    agent_runtime.get_open_positions_pnl. Separate from the main trade
+    listing since it needs a live market data fetch, not just a DB read."""
+    return get_open_positions_pnl(db)
 
 
 @router.get("/{trade_id}", response_model=TradeOut)
@@ -101,5 +115,34 @@ def close_trade_early(trade_id: str, db: Session = Depends(get_db)):
         raise HTTPException(422, f"No price available for {trade.stock_symbol}")
 
     close_trade_manually(db, trade, price)
+    db.refresh(trade)
+    return trade
+
+
+@router.patch("/{trade_id}/protection", response_model=TradeOut)
+def edit_protection(trade_id: str, payload: ModifyProtectionIn, db: Session = Depends(get_db)):
+    """Edit the stop-loss / target levels on an open position - cancels the
+    old GTT bracket and arms a new one at the given prices (Section 4
+    'Protect')."""
+    trade = db.query(Trade).filter(Trade.trade_id == trade_id).first()
+    if trade is None:
+        raise HTTPException(404, "Trade not found")
+    if trade.status != "open":
+        raise HTTPException(400, f"Trade is already {trade.status}")
+
+    # Direction-consistency guard: a valid bracket must straddle the entry
+    # the right way round, otherwise a GTT would fire the instant it's armed.
+    if trade.direction == "buy":
+        if payload.stop_loss_price >= trade.buy_price:
+            raise HTTPException(422, f"For a long position, stop-loss (₹{payload.stop_loss_price}) must be below the buy price (₹{trade.buy_price}).")
+        if payload.target_price is not None and payload.target_price <= trade.buy_price:
+            raise HTTPException(422, f"For a long position, target (₹{payload.target_price}) must be above the buy price (₹{trade.buy_price}).")
+    else:
+        if payload.stop_loss_price <= trade.buy_price:
+            raise HTTPException(422, f"For a short position, stop-loss (₹{payload.stop_loss_price}) must be above the entry price (₹{trade.buy_price}).")
+        if payload.target_price is not None and payload.target_price >= trade.buy_price:
+            raise HTTPException(422, f"For a short position, target (₹{payload.target_price}) must be below the entry price (₹{trade.buy_price}).")
+
+    modify_protection(db, trade, payload.stop_loss_price, payload.target_price)
     db.refresh(trade)
     return trade
