@@ -225,3 +225,4 @@ executes real trades with real capital. It is not financial advice, and
 stop-loss orders do not guarantee execution at the exact trigger price
 (slippage risk, especially in volatile/illiquid stocks).
 # agentic-stop-loss-trading
+# agentic-stop-loss
