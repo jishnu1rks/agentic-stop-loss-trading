@@ -349,7 +349,7 @@ export default function TradeLogTable({
                 Cancel
               </button>
               <button className="btn btn-sell" onClick={() => handleClose(confirmClose.trade_id)} disabled={closingId != null}>
-                {closingId ? "Closing…" : "Close position"}
+                {closingId ? "Closing…" : "Close position"} 
               </button>
             </>
           }
