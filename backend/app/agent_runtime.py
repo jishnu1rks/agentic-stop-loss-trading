@@ -486,6 +486,45 @@ def modify_protection(
     return trade
 
 
+def reconcile_open_gtts(db: Session) -> int:
+    """Startup safety net for a Phase 1 quirk: SimulatorBrokerAdapter's GTT
+    store is in-process memory only (see adapters/broker/simulator.py),
+    while trades persist in the database. Any process restart (dev
+    --reload picking up a save, a crash, a redeploy) wipes every
+    previously-armed GTT, leaving already-open trades stuck open forever -
+    even once price clears their stop-loss/target - because
+    monitor_open_positions() can only fire GTTs the broker currently knows
+    about. Re-arming every open trade's brackets here on every startup
+    fixes that; place_gtt is idempotent on client_order_id, so for trades
+    the broker already has this is a no-op. Returns the number of trades
+    reconciled."""
+    broker = get_broker_adapter()
+    open_trades = db.query(Trade).filter(Trade.status == "open").all()
+    for trade in open_trades:
+        exit_dir = exit_direction(trade.direction)
+        if trade.stop_loss_gtt_id and trade.stop_loss_price:
+            broker.place_gtt(
+                client_order_id=trade.stop_loss_gtt_id,
+                symbol=trade.stock_symbol,
+                direction=exit_dir,
+                trigger_price=trade.stop_loss_price,
+                comparator="lte" if trade.direction == "buy" else "gte",
+                quantity=trade.quantity,
+                kind="stop_loss",
+            )
+        if trade.target_gtt_id and trade.target_price is not None:
+            broker.place_gtt(
+                client_order_id=trade.target_gtt_id,
+                symbol=trade.stock_symbol,
+                direction=exit_dir,
+                trigger_price=trade.target_price,
+                comparator="gte" if trade.direction == "buy" else "lte",
+                quantity=trade.quantity,
+                kind="target",
+            )
+    return len(open_trades)
+
+
 def run_agent_scan(db: Session, agent: Agent) -> None:
     """Scan -> Signal -> Entry -> Protect -> Log for one agent (Section 4)."""
     if not agent.active:

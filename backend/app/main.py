@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent_runtime import reconcile_open_gtts
 from app.auth import require_auth
 from app.config import settings
-from app.db import init_db
+from app.db import SessionLocal, init_db
 from app.routers import agents, cron, dashboard, trades
 from app.scheduler import start_scheduler
 
@@ -13,6 +14,11 @@ from app.scheduler import start_scheduler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    db = SessionLocal()
+    try:
+        reconcile_open_gtts(db)
+    finally:
+        db.close()
     start_scheduler()
     yield
 

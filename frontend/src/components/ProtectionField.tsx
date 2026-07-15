@@ -28,7 +28,7 @@ export default function ProtectionField({
         </label>
         <div className="mode-toggle">
           <button type="button" className={mode === "price" ? "active" : ""} onClick={() => onModeChange("price")}>
-            ₹
+            Price
           </button>
           <button type="button" className={mode === "pct" ? "active" : ""} onClick={() => onModeChange("pct")}>
             %

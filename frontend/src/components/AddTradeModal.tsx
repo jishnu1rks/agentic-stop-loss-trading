@@ -56,7 +56,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
     entry != null && slHasValue
       ? slMode === "price"
         ? `≈ ${stopLossPctFromPrice(entry, slNum).toFixed(2)}% from CMP`
-        : `≈ ₹${stopLossPriceFromPct(direction, entry, slNum).toFixed(2)}`
+        : `≈ ${stopLossPriceFromPct(direction, entry, slNum).toFixed(2)}`
       : undefined;
 
   const tgtNum = Number(tgtValue);
@@ -66,7 +66,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
     entry != null && tgtHasValue
       ? tgtMode === "price"
         ? `≈ ${targetPctFromPrice(entry, tgtNum).toFixed(2)}% from CMP`
-        : `≈ ₹${targetPriceFromPct(direction, entry, tgtNum).toFixed(2)}`
+        : `≈ ${targetPriceFromPct(direction, entry, tgtNum).toFixed(2)}`
       : undefined;
 
   const qtyNum = Number(quantity);
@@ -161,7 +161,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
             <dt>Symbol</dt>
             <dd>{quote.symbol}</dd>
             <dt>Current price</dt>
-            <dd>₹{quote.price.toFixed(2)}</dd>
+            <dd>{quote.price.toFixed(2)}</dd>
           </dl>
 
           <div className="modal-field">
@@ -186,7 +186,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
             secondaryText={slSecondary}
             hint={
               slPrice != null
-                ? `Exits at ₹${slPrice.toFixed(2)}. ${direction === "buy" ? "Below" : "Above"} the entry price.`
+                ? `Exits at ${slPrice.toFixed(2)}. ${direction === "buy" ? "Below" : "Above"} the entry price.`
                 : "Leave blank to skip a stop-loss (not recommended)."
             }
             optional
@@ -199,7 +199,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
             onModeChange={setTgtMode}
             onValueChange={setTgtValue}
             secondaryText={tgtSecondary}
-            hint={tgtPrice != null ? `Exits at ₹${tgtPrice.toFixed(2)}.` : "Leave blank to skip a target."}
+            hint={tgtPrice != null ? `Exits at ${tgtPrice.toFixed(2)}.` : "Leave blank to skip a target."}
             optional
           />
         </>

@@ -9,7 +9,7 @@ export default function OpenTradesPage({ refreshTick, onChanged }: { refreshTick
     <div className="section">
       <div className="section-header-row">
         <button className="btn btn-buy" onClick={() => setShowAdd(true)}>
-          + Add trade
+          Manual +
         </button>
       </div>
       <TradeLogTable key={`open-${refreshTick}`} lockedStatus="open" onChanged={onChanged} />

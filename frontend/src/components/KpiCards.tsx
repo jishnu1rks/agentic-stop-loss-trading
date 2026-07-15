@@ -4,7 +4,7 @@ function fmt(n: number) {
   return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 }
 function fmtMoney(n: number) {
-  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  return `${n.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }
 
 export default function KpiCards({ kpis }: { kpis: Kpis }) {

@@ -12,6 +12,11 @@ function fmtDate(d: string | null) {
   return new Date(d).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 }
 
+function fmtDateOnly(d: string | null) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("en-IN", { dateStyle: "medium" });
+}
+
 type Column = {
   id: string;
   label: string;
@@ -133,10 +138,10 @@ export default function TradeLogTable({
     const text =
       t.status === "open"
         ? pnl
-          ? `₹${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
+          ? `${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
           : "—"
         : t.net_profit != null
-          ? `₹${t.net_profit.toFixed(2)}`
+          ? `${t.net_profit.toFixed(2)}`
           : "—";
     return (
       <button className="editable-cell" title="Click to view charges & fees breakdown" onClick={() => setChargesTrade(t)}>
@@ -162,12 +167,12 @@ export default function TradeLogTable({
     },
     currentPrice: {
       id: "current_price",
-      label: "Current price",
-      cell: (t, pnl) => (t.status === "open" && pnl ? `₹${pnl.current_price.toFixed(2)}` : "—"),
+      label: "CMP",
+      cell: (t, pnl) => (t.status === "open" && pnl ? `${pnl.current_price.toFixed(2)}` : "—"),
     },
     direction: {
       id: "direction",
-      label: "Direction",
+      label: "",
       sortKey: "direction",
       cell: (t) => <span className={`pill ${t.direction}`}>{t.direction}</span>,
     },
@@ -176,13 +181,7 @@ export default function TradeLogTable({
       id: "buy_price",
       label: "Buy price",
       sortKey: "buy_price",
-      cell: (t) => `₹${t.buy_price.toFixed(2)}`,
-    },
-    sellPrice: {
-      id: "sell_price",
-      label: "Sell price",
-      sortKey: "sell_price",
-      cell: (t) => (t.sell_price != null ? `₹${t.sell_price.toFixed(2)}` : "—"),
+      cell: (t) => `${t.buy_price.toFixed(2)}`,
     },
     stopLoss: {
       id: "stop_loss",
@@ -190,7 +189,7 @@ export default function TradeLogTable({
       sortKey: "stop_loss_price",
       cell: (t) => {
         const value = t.stop_loss_price
-          ? `₹${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (${t.stop_loss_pct.toFixed(1)}%)` : ""}`
+          ? `${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (${t.stop_loss_pct.toFixed(1)}%)` : ""}`
           : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
@@ -208,7 +207,7 @@ export default function TradeLogTable({
       cell: (t) => {
         const value =
           t.target_price != null
-            ? `₹${t.target_price.toFixed(2)}${t.target_pct != null ? ` (${t.target_pct.toFixed(1)}%)` : ""}`
+            ? `${t.target_price.toFixed(2)}${t.target_pct != null ? ` (${t.target_pct.toFixed(1)}%)` : ""}`
             : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
@@ -219,33 +218,40 @@ export default function TradeLogTable({
         );
       },
     },
-    purchaseDate: {
-      id: "purchase_date",
-      label: "Purchase date",
+    buyDate: {
+      id: "buy_date",
+      label: "Buy date",
       sortKey: "purchase_date",
-      cell: (t) => fmtDate(t.purchase_date),
+      cell: (t) => fmtDateOnly(t.purchase_date),
     },
-    sellDate: { id: "sell_date", label: "Sell date", sortKey: "sell_date", cell: (t) => fmtDate(t.sell_date) },
+    sellDate: { id: "sell_date", label: "Sell date", sortKey: "sell_date", cell: (t) => fmtDateOnly(t.sell_date) },
+    investmentAmount: {
+      id: "investment_amount",
+      label: "Investment",
+      cell: (t) => `${(t.buy_price * t.quantity).toFixed(2)}`,
+    },
+    profitLoss: {
+      id: "profit_loss",
+      label: "Profit/Loss",
+      sortKey: "gross_profit",
+      cell: (t) => (t.gross_profit != null ? `${t.gross_profit.toFixed(2)}` : "—"),
+      cellClassName: (t) => (t.gross_profit != null ? (t.gross_profit >= 0 ? "text-green" : "text-red") : ""),
+    },
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
     charges: {
       id: "charges",
       label: "Charges",
       sortKey: "charges",
-      cell: (t) => (t.charges != null ? `₹${t.charges.toFixed(2)}` : "—"),
+      cell: (t) => (t.charges != null ? `${t.charges.toFixed(2)}` : "—"),
     },
-    tax: { id: "tax", label: "Tax", sortKey: "tax", cell: (t) => (t.tax != null ? `₹${t.tax.toFixed(2)}` : "—") },
-    exitReason: { id: "exit_reason", label: "Exit reason", sortKey: "exit_reason", cell: (t) => t.exit_reason ?? "—" },
-    agent: {
-      id: "agent",
-      label: "Agent",
-      sortKey: "agent_id",
-      cell: (t) => (t.agent_id ? (agentNameById[t.agent_id] ?? t.agent_id) : "Manual"),
-    },
-    status: {
-      id: "status",
-      label: "Status",
-      sortKey: "status",
-      cell: (t) => <span className={`pill ${t.status}`}>{t.status}</span>,
+    mode: {
+      id: "mode",
+      label: "Mode",
+      cell: (t) => (
+        <span title={t.is_manual ? "Manual" : (t.agent_id ? (agentNameById[t.agent_id] ?? t.agent_id) : "Agent")}>
+          {t.is_manual ? "👆" : "🤖"}
+        </span>
+      ),
     },
     actions: {
       id: "actions",
@@ -253,7 +259,7 @@ export default function TradeLogTable({
       cell: (t) =>
         t.status === "open" ? (
           <button className="btn btn-close" onClick={() => setConfirmClose(t)}>
-            Close
+            Exit
           </button>
         ) : null,
     },
@@ -266,38 +272,30 @@ export default function TradeLogTable({
   const columns: Column[] = isOpenView
     ? [
         cols.stock,
-        cols.currentPrice,
-        cols.qty,
+        cols.direction,
         cols.buyPrice,
+        cols.qty,
+        cols.currentPrice,
         cols.stopLoss,
         cols.target,
         cols.netPnl,
-        cols.agent,
+        cols.mode,
         cols.actions,
       ]
     : [
         cols.stock,
-        cols.direction,
-        cols.qty,
-        cols.buyPrice,
-        cols.sellPrice,
-        cols.stopLoss,
-        cols.target,
-        cols.purchaseDate,
+        cols.buyDate,
         cols.sellDate,
-        cols.netPnl,
+        cols.investmentAmount,
+        cols.profitLoss,
         cols.charges,
-        cols.tax,
-        cols.exitReason,
-        cols.agent,
-        cols.status,
-        cols.currentPrice,
-        cols.actions,
+        cols.netPnl,
+        cols.mode,
       ];
 
   return (
     <div className="panel">
-      {title && (
+      {/* {title && (
         <div className="panel-header">
           <h3>{title}</h3>
         </div>
@@ -330,7 +328,7 @@ export default function TradeLogTable({
             <option value="manual">Manual trades only</option>
           </select>
         </div>
-      )}
+      )} */}
 
       {sorted.length === 0 ? (
         <div className="empty-state">{isOpenView ? "No open trades yet" : "No trades match these filters"}</div>

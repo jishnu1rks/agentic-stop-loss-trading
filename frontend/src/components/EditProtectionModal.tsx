@@ -43,7 +43,7 @@ export default function EditProtectionModal({
   const slSecondary = slHasValue
     ? slMode === "price"
       ? `≈ ${stopLossPctFromPrice(entry, slNum).toFixed(2)}% from entry`
-      : `≈ ₹${stopLossPriceFromPct(trade.direction, entry, slNum).toFixed(2)}`
+      : `≈ ${stopLossPriceFromPct(trade.direction, entry, slNum).toFixed(2)}`
     : undefined;
 
   const tgtNum = Number(tgtValue);
@@ -52,7 +52,7 @@ export default function EditProtectionModal({
   const tgtSecondary = tgtHasValue
     ? tgtMode === "price"
       ? `≈ ${targetPctFromPrice(entry, tgtNum).toFixed(2)}% from entry`
-      : `≈ ₹${targetPriceFromPct(trade.direction, entry, tgtNum).toFixed(2)}`
+      : `≈ ${targetPriceFromPct(trade.direction, entry, tgtNum).toFixed(2)}`
     : undefined;
 
   const handleSave = async () => {
@@ -84,7 +84,7 @@ export default function EditProtectionModal({
 
   const pnlText =
     pnl != null
-      ? `₹${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
+      ? `${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
       : "—";
 
   return (
@@ -114,9 +114,9 @@ export default function EditProtectionModal({
         <dt>Quantity</dt>
         <dd>{trade.quantity}</dd>
         <dt>Buy price</dt>
-        <dd>₹{trade.buy_price.toFixed(2)}</dd>
+        <dd>{trade.buy_price.toFixed(2)}</dd>
         <dt>Current price</dt>
-        <dd>{pnl != null ? `₹${pnl.current_price.toFixed(2)}` : "—"}</dd>
+        <dd>{pnl != null ? `${pnl.current_price.toFixed(2)}` : "—"}</dd>
         <dt>Unrealized P&amp;L</dt>
         <dd className={pnl != null ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : ""}>{pnlText}</dd>
         <dt>Agent</dt>
