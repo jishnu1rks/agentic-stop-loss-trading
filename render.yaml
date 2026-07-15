@@ -28,7 +28,7 @@ services:
       - key: BASIC_AUTH_PASSWORD
         sync: false
       - key: CORS_ORIGINS
-        value: https://agentic-stop-loss.vercel.app
+        value: https://agentic-stop-loss-trading.vercel.app
 
   - type: web
     name: stop-loss-trading-frontend
