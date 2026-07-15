@@ -109,13 +109,12 @@ def get_capital_summary(db: Session) -> dict:
 def get_open_positions_pnl(db: Session) -> dict[str, dict]:
     """Live mark-to-market for every open trade: current price, unrealized
     P&L (before charges/tax - those only get finalized on exit, see
-    close_trade), a 0-100 "heading" score showing where the current price
-    sits between the stop-loss and target (0 = at stop-loss, 100 = at
-    target), and a trailing-stop-loss reference value. Keyed by trade_id so
-    the frontend can merge it onto the trade rows it already has, rather
-    than a duplicate trade listing. Best-effort per symbol - a quote that
-    fails to fetch just leaves that trade out of the result rather than
-    failing the batch."""
+    close_trade), and a 0-100 "heading" score showing where the current
+    price sits between the stop-loss and target (0 = at stop-loss, 100 =
+    at target). Keyed by trade_id so the frontend can merge it onto the
+    trade rows it already has, rather than a duplicate trade listing.
+    Best-effort per symbol - a quote that fails to fetch just leaves that
+    trade out of the result rather than failing the batch."""
     open_trades = db.query(Trade).filter(Trade.status == "open").all()
     if not open_trades:
         return {}
@@ -153,26 +152,11 @@ def get_open_positions_pnl(db: Session) -> dict[str, dict]:
                 )
                 heading_pct = round(min(100.0, max(0.0, progress * 100)), 1)
 
-        # Display-only reference value - NOT wired to the actual GTT, which
-        # still exits at the original fixed stop_loss_price. This just
-        # shows what a trailing stop (same % distance as the original
-        # stop-loss, but measured from the current price) would be if price
-        # has moved favorably enough to make it tighter than the original.
-        # It only ever ratchets in the trade's favor, never loosens past
-        # the original stop.
-        if trade.direction == "buy":
-            trailing_candidate = price * (1 - trade.stop_loss_pct / 100)
-            trailing_stop_loss = round(max(trade.stop_loss_price, trailing_candidate), 2)
-        else:
-            trailing_candidate = price * (1 + trade.stop_loss_pct / 100)
-            trailing_stop_loss = round(min(trade.stop_loss_price, trailing_candidate), 2)
-
         result[trade.trade_id] = {
             "current_price": round(price, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
             "unrealized_pnl_pct": unrealized_pnl_pct,
             "heading_pct": heading_pct,
-            "trailing_stop_loss": trailing_stop_loss,
         }
     return result
 
@@ -595,6 +579,35 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     # decision log for a no-op cycle silently vanished when the session
     # closed.
     db.commit()
+
+
+def estimate_trade_charges(trade: Trade, reference_price: float) -> dict:
+    """Itemized charge + tax breakdown for the Net P&L breakup popup. For a
+    closed trade, reference_price is the actual sell_price, so this
+    reconstructs the same numbers already stored on trade.charges/trade.tax
+    (those only store the totals, not the line items). For an open trade,
+    reference_price is the latest quote - an estimate of what closing right
+    now would cost, not yet finalized (finalization happens in close_trade)."""
+    breakdown = compute_charges(trade.direction, trade.buy_price, reference_price, trade.quantity)
+    gross = (reference_price - trade.buy_price) * trade.quantity
+    if trade.direction == "sell":
+        gross = -gross  # short: profit when price falls
+    tax = estimate_tax(gross, breakdown.total)
+
+    return {
+        "brokerage": breakdown.brokerage,
+        "stt": breakdown.stt,
+        "exchange_txn": breakdown.exchange_txn,
+        "sebi_charges": breakdown.sebi_charges,
+        "stamp_duty": breakdown.stamp_duty,
+        "gst": breakdown.gst,
+        "total_charges": breakdown.total,
+        "tax": tax,
+        "gross_profit": round(gross, 2),
+        "net_profit": round(gross - breakdown.total - tax, 2),
+        "reference_price": round(reference_price, 2),
+        "is_estimate": trade.status == "open",
+    }
 
 
 def force_close(db: Session, trade: Trade, current_price: float, exit_reason: str) -> None:

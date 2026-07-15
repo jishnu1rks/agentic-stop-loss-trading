@@ -3,9 +3,11 @@ import type {
   Agent,
   AgentBreakdown,
   AgentConfigIn,
+  ChargesBreakdown,
   Kpis,
   ManualTradeInput,
   OpenPositionPnl,
+  Quote,
   Recommendation,
   Trade,
 } from "./types";
@@ -80,6 +82,9 @@ export const api = {
     client.post<Trade>(`/trades/${tradeId}/close`).then((r) => r.data),
   editProtection: (tradeId: string, payload: { stop_loss_price: number; target_price: number | null }) =>
     client.patch<Trade>(`/trades/${tradeId}/protection`, payload).then((r) => r.data),
+  getQuote: (symbol: string) => client.get<Quote>(`/trades/quote/${encodeURIComponent(symbol)}`).then((r) => r.data),
+  getTradeCharges: (tradeId: string) =>
+    client.get<ChargesBreakdown>(`/trades/${tradeId}/charges`).then((r) => r.data),
 
   kpis: () => client.get<Kpis>("/dashboard/kpis").then((r) => r.data),
 };

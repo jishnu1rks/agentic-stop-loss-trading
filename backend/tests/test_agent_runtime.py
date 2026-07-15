@@ -4,6 +4,7 @@ from app.agent_runtime import (
     build_watchlist_recommendations,
     close_trade_manually,
     enter_position,
+    estimate_trade_charges,
     get_capital_summary,
     get_open_positions_pnl,
     modify_protection,
@@ -146,6 +147,63 @@ def test_short_position_profits_when_price_falls(db_session):
     close_trade_manually(db_session, trade, current_price=95.0)
     db_session.refresh(trade)
     assert trade.gross_profit == 50.0  # (100 - 95) * 10
+
+
+# ---- Net P&L breakup popup ----
+
+def test_estimate_trade_charges_matches_stored_totals_for_closed_trade(db_session):
+    trade = enter_position(
+        db_session,
+        agent_id=None,
+        symbol="TEST5",
+        direction="buy",
+        quantity=10,
+        ref_price=100.0,
+        buy_stop_loss_pct=10,
+        sell_stop_loss_pct=10,
+        target_pct=5,
+        is_manual=True,
+    )
+    close_trade_manually(db_session, trade, current_price=101.0)
+    db_session.refresh(trade)
+
+    breakdown = estimate_trade_charges(trade, trade.sell_price)
+
+    assert breakdown["is_estimate"] is False
+    assert breakdown["total_charges"] == trade.charges
+    assert breakdown["tax"] == trade.tax
+    assert breakdown["net_profit"] == trade.net_profit
+    # line items should sum to the stored total
+    line_items = (
+        breakdown["brokerage"]
+        + breakdown["stt"]
+        + breakdown["exchange_txn"]
+        + breakdown["sebi_charges"]
+        + breakdown["stamp_duty"]
+        + breakdown["gst"]
+    )
+    assert round(line_items, 2) == breakdown["total_charges"]
+
+
+def test_estimate_trade_charges_is_marked_estimate_for_open_trade(db_session):
+    trade = enter_position(
+        db_session,
+        agent_id=None,
+        symbol="TEST6",
+        direction="buy",
+        quantity=10,
+        ref_price=100.0,
+        buy_stop_loss_pct=10,
+        sell_stop_loss_pct=10,
+        target_pct=5,
+        is_manual=True,
+    )
+
+    breakdown = estimate_trade_charges(trade, 103.0)
+
+    assert breakdown["is_estimate"] is True
+    assert breakdown["reference_price"] == 103.0
+    assert breakdown["gross_profit"] == 30.0  # (103 - 100) * 10
 
 
 # ---- Recommendations (live watchlist evaluation) ----
@@ -476,46 +534,6 @@ def test_heading_pct_none_when_no_target_configured(db_session, monkeypatch):
     monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
 
     assert get_open_positions_pnl(db_session)[trade.trade_id]["heading_pct"] is None
-
-
-def test_trailing_stop_loss_ratchets_up_when_price_rises_for_buy(db_session, monkeypatch):
-    # buy at 100, stop-loss 10% -> fixed stop stays at 90.
-    trade = enter_position(
-        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
-        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
-    )
-    assert trade.stop_loss_price == 90.0
-
-    # Price hasn't moved - trailing candidate (100*0.9=90) ties the fixed stop.
-    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
-    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 90.0
-
-    # Price rises to 150 - trailing candidate is 150*0.9=135, tighter than the fixed 90 -> ratchets up.
-    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 150.0}))
-    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 135.0
-
-
-def test_trailing_stop_loss_never_loosens_past_original_for_buy(db_session, monkeypatch):
-    trade = enter_position(
-        db_session, agent_id=None, symbol="FOO", direction="buy", quantity=10,
-        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
-    )
-    # Price drops to 95 - trailing candidate (95*0.9=85.5) is looser than the fixed stop (90) - stays at 90.
-    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 95.0}))
-    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 90.0
-
-
-def test_trailing_stop_loss_ratchets_down_when_price_falls_for_short(db_session, monkeypatch):
-    # sell at 100, stop-loss 10% -> fixed stop stays at 110.
-    trade = enter_position(
-        db_session, agent_id=None, symbol="FOO", direction="sell", quantity=10,
-        ref_price=100.0, buy_stop_loss_pct=10, sell_stop_loss_pct=10, target_pct=None, is_manual=True,
-    )
-    assert trade.stop_loss_price == 110.0
-
-    # Price falls to 80 - trailing candidate is 80*1.1=88, tighter than fixed 110 -> ratchets down.
-    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 80.0}))
-    assert get_open_positions_pnl(db_session)[trade.trade_id]["trailing_stop_loss"] == 88.0
 
 
 def test_open_positions_pnl_empty_when_no_open_trades(db_session):

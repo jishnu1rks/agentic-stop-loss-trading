@@ -526,7 +526,8 @@ tr:hover td {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
-.modal-field input {
+.modal-field input,
+.modal-field select {
   background: var(--bg);
   border: 1px solid var(--panel-border);
   color: var(--text);
@@ -538,6 +539,38 @@ tr:hover td {
 .modal-field .field-hint {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+.protection-field-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mode-toggle {
+  display: flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mode-toggle button {
+  background: var(--bg);
+  border: none;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mode-toggle button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.section-header-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
 }
 
 .editable-cell {

@@ -14,6 +14,7 @@ export interface Trade {
   sell_date: string | null;
   stop_loss_pct: number;
   stop_loss_price: number;
+  target_pct: number | null;
   target_price: number | null;
   exit_reason: ExitReason | null;
   gross_profit: number | null;
@@ -30,9 +31,6 @@ export interface OpenPositionPnl {
   unrealized_pnl: number;
   unrealized_pnl_pct: number;
   heading_pct: number | null; // 0-100 position between stop-loss (0) and target (100), null if no target set
-  // Display-only reference value - NOT the trade's actual exit price. The
-  // real GTT still exits at the trade's fixed stop_loss_price.
-  trailing_stop_loss: number;
 }
 
 export interface AgentRiskConfig {
@@ -127,6 +125,26 @@ export interface Recommendation {
   proximity_pct?: number;
   already_open?: boolean;
   rationale?: string;
+}
+
+export interface Quote {
+  symbol: string;
+  price: number;
+}
+
+export interface ChargesBreakdown {
+  brokerage: number;
+  stt: number;
+  exchange_txn: number;
+  sebi_charges: number;
+  stamp_duty: number;
+  gst: number;
+  total_charges: number;
+  tax: number;
+  gross_profit: number;
+  net_profit: number;
+  reference_price: number;
+  is_estimate: boolean;
 }
 
 export interface ManualTradeInput {

@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { Agent, OpenPositionPnl, Trade } from "../api/types";
 import Modal from "./Modal";
 import EditProtectionModal from "./EditProtectionModal";
+import ChargesBreakdownModal from "./ChargesBreakdownModal";
 
 type SortKey = keyof Trade;
 
@@ -41,6 +42,7 @@ export default function TradeLogTable({
   const [closingId, setClosingId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<Trade | null>(null);
   const [editTrade, setEditTrade] = useState<Trade | null>(null);
+  const [chargesTrade, setChargesTrade] = useState<Trade | null>(null);
 
   const isOpenView = lockedStatus === "open";
 
@@ -128,12 +130,19 @@ export default function TradeLogTable({
   // ---- Column definitions (header + cell stay in sync; ordering is just
   // the order of this list, so moving a column is a one-line move) ----
   const netPnlCell = (t: Trade, pnl?: OpenPositionPnl): ReactNode => {
-    if (t.status === "open") {
-      return pnl
-        ? `₹${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
-        : "—";
-    }
-    return t.net_profit != null ? `₹${t.net_profit.toFixed(2)}` : "—";
+    const text =
+      t.status === "open"
+        ? pnl
+          ? `₹${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
+          : "—"
+        : t.net_profit != null
+          ? `₹${t.net_profit.toFixed(2)}`
+          : "—";
+    return (
+      <button className="editable-cell" title="Click to view charges & fees breakdown" onClick={() => setChargesTrade(t)}>
+        {text}
+      </button>
+    );
   };
   const netPnlClass = (t: Trade, pnl?: OpenPositionPnl): string => {
     if (t.status === "open") return pnl ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : "";
@@ -179,9 +188,10 @@ export default function TradeLogTable({
       id: "stop_loss",
       label: "Stop loss",
       sortKey: "stop_loss_price",
-      cellClassName: () => "text-red",
       cell: (t) => {
-        const value = t.stop_loss_price ? `₹${t.stop_loss_price.toFixed(2)}` : "—";
+        const value = t.stop_loss_price
+          ? `₹${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (${t.stop_loss_pct.toFixed(1)}%)` : ""}`
+          : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
             {value}
@@ -195,9 +205,11 @@ export default function TradeLogTable({
       id: "target",
       label: "Target",
       sortKey: "target_price",
-      cellClassName: () => "text-green",
       cell: (t) => {
-        const value = t.target_price != null ? `₹${t.target_price.toFixed(2)}` : "—";
+        const value =
+          t.target_price != null
+            ? `₹${t.target_price.toFixed(2)}${t.target_pct != null ? ` (${t.target_pct.toFixed(1)}%)` : ""}`
+            : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
             {value}
@@ -235,13 +247,6 @@ export default function TradeLogTable({
       sortKey: "status",
       cell: (t) => <span className={`pill ${t.status}`}>{t.status}</span>,
     },
-    tsl: {
-      id: "tsl",
-      label: "TSL",
-      headerTitle: "Reference only - the position still exits at the fixed Stop loss shown earlier",
-      cellClassName: () => "text-dim",
-      cell: (t, pnl) => (t.status === "open" && pnl ? `₹${pnl.trailing_stop_loss.toFixed(2)}` : "—"),
-    },
     actions: {
       id: "actions",
       label: "",
@@ -262,15 +267,12 @@ export default function TradeLogTable({
     ? [
         cols.stock,
         cols.currentPrice,
-        cols.direction,
         cols.qty,
         cols.buyPrice,
         cols.stopLoss,
         cols.target,
         cols.netPnl,
         cols.agent,
-        cols.status,
-        cols.tsl,
         cols.actions,
       ]
     : [
@@ -290,7 +292,6 @@ export default function TradeLogTable({
         cols.agent,
         cols.status,
         cols.currentPrice,
-        cols.tsl,
         cols.actions,
       ];
 
@@ -400,6 +401,8 @@ export default function TradeLogTable({
           onSaved={afterEdit}
         />
       )}
+
+      {chargesTrade && <ChargesBreakdownModal trade={chargesTrade} onClose={() => setChargesTrade(null)} />}
     </div>
   );
 }
