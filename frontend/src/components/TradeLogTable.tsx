@@ -4,6 +4,7 @@ import type { Agent, OpenPositionPnl, Trade } from "../api/types";
 import Modal from "./Modal";
 import EditProtectionModal from "./EditProtectionModal";
 import ChargesBreakdownModal from "./ChargesBreakdownModal";
+import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
 
@@ -47,7 +48,11 @@ export default function TradeLogTable({
   const [closingId, setClosingId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<Trade | null>(null);
   const [editTrade, setEditTrade] = useState<Trade | null>(null);
+  // Two distinct popups, each with its own state so they never bleed into
+  // each other: the charges & tax breakdown (History's Charges column) and
+  // the full trade-details breakdown (either view's P&L column).
   const [chargesTrade, setChargesTrade] = useState<Trade | null>(null);
+  const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
 
   const isOpenView = lockedStatus === "open";
 
@@ -144,7 +149,7 @@ export default function TradeLogTable({
           ? `${t.net_profit.toFixed(2)}`
           : "—";
     return (
-      <button className="editable-cell" title="Click to view charges & fees breakdown" onClick={() => setChargesTrade(t)}>
+      <button className="editable-cell" title="Click to view all trade details" onClick={() => setDetailsTrade(t)}>
         {text}
       </button>
     );
@@ -189,7 +194,7 @@ export default function TradeLogTable({
       sortKey: "stop_loss_price",
       cell: (t) => {
         const value = t.stop_loss_price
-          ? `${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (${t.stop_loss_pct.toFixed(1)}%)` : ""}`
+          ? `${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (-${t.stop_loss_pct.toFixed(1)}%)` : ""}`
           : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
@@ -242,7 +247,14 @@ export default function TradeLogTable({
       id: "charges",
       label: "Charges",
       sortKey: "charges",
-      cell: (t) => (t.charges != null ? `${t.charges.toFixed(2)}` : "—"),
+      cell: (t) =>
+        t.charges != null ? (
+          <button className="editable-cell" title="Click to view charges & tax breakdown" onClick={() => setChargesTrade(t)}>
+            {t.charges.toFixed(2)}
+          </button>
+        ) : (
+          "—"
+        ),
     },
     mode: {
       id: "mode",
@@ -401,6 +413,15 @@ export default function TradeLogTable({
       )}
 
       {chargesTrade && <ChargesBreakdownModal trade={chargesTrade} onClose={() => setChargesTrade(null)} />}
+
+      {detailsTrade && (
+        <TradeDetailsModal
+          trade={detailsTrade}
+          pnl={pnlByTradeId[detailsTrade.trade_id]}
+          agentName={detailsTrade.agent_id ? (agentNameById[detailsTrade.agent_id] ?? detailsTrade.agent_id) : "Manual"}
+          onClose={() => setDetailsTrade(null)}
+        />
+      )}
     </div>
   );
 }

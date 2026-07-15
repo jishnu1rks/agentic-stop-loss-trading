@@ -49,6 +49,24 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
 
   const entry = quote?.price ?? null;
 
+  const handleSlModeChange = (m: ProtectionMode) => {
+    const n = Number(slValue);
+    if (entry != null && slValue.trim() !== "" && !Number.isNaN(n) && n > 0) {
+      const converted = m === "pct" ? stopLossPctFromPrice(entry, n) : stopLossPriceFromPct(direction, entry, n);
+      setSlValue(converted.toFixed(2));
+    }
+    setSlMode(m);
+  };
+
+  const handleTgtModeChange = (m: ProtectionMode) => {
+    const n = Number(tgtValue);
+    if (entry != null && tgtValue.trim() !== "" && !Number.isNaN(n) && n > 0) {
+      const converted = m === "pct" ? targetPctFromPrice(entry, n) : targetPriceFromPct(direction, entry, n);
+      setTgtValue(converted.toFixed(2));
+    }
+    setTgtMode(m);
+  };
+
   const slNum = Number(slValue);
   const slHasValue = slValue.trim() !== "" && !Number.isNaN(slNum) && slNum > 0;
   const slPrice = entry != null && slHasValue ? (slMode === "price" ? slNum : stopLossPriceFromPct(direction, entry, slNum)) : null;
@@ -181,7 +199,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
             label="Stop loss"
             mode={slMode}
             value={slValue}
-            onModeChange={setSlMode}
+            onModeChange={handleSlModeChange}
             onValueChange={setSlValue}
             secondaryText={slSecondary}
             hint={
@@ -196,7 +214,7 @@ export default function AddTradeModal({ onClose, onSaved }: { onClose: () => voi
             label="Target"
             mode={tgtMode}
             value={tgtValue}
-            onModeChange={setTgtMode}
+            onModeChange={handleTgtModeChange}
             onValueChange={setTgtValue}
             secondaryText={tgtSecondary}
             hint={tgtPrice != null ? `Exits at ${tgtPrice.toFixed(2)}.` : "Leave blank to skip a target."}

@@ -37,6 +37,25 @@ export default function EditProtectionModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const handleSlModeChange = (m: ProtectionMode) => {
+    const n = Number(slValue);
+    if (slValue.trim() !== "" && !Number.isNaN(n) && n > 0) {
+      const converted =
+        m === "pct" ? stopLossPctFromPrice(entry, n) : stopLossPriceFromPct(trade.direction, entry, n);
+      setSlValue(converted.toFixed(2));
+    }
+    setSlMode(m);
+  };
+
+  const handleTgtModeChange = (m: ProtectionMode) => {
+    const n = Number(tgtValue);
+    if (tgtValue.trim() !== "" && !Number.isNaN(n) && n > 0) {
+      const converted = m === "pct" ? targetPctFromPrice(entry, n) : targetPriceFromPct(trade.direction, entry, n);
+      setTgtValue(converted.toFixed(2));
+    }
+    setTgtMode(m);
+  };
+
   const slNum = Number(slValue);
   const slHasValue = slValue.trim() !== "" && !Number.isNaN(slNum) && slNum > 0;
   const slPrice = slHasValue ? (slMode === "price" ? slNum : stopLossPriceFromPct(trade.direction, entry, slNum)) : null;
@@ -133,7 +152,7 @@ export default function EditProtectionModal({
         label="Stop loss"
         mode={slMode}
         value={slValue}
-        onModeChange={setSlMode}
+        onModeChange={handleSlModeChange}
         onValueChange={setSlValue}
         secondaryText={slSecondary}
         hint={trade.direction === "buy" ? "Must be below the buy price." : "Must be above the entry price."}
@@ -143,7 +162,7 @@ export default function EditProtectionModal({
         label="Target"
         mode={tgtMode}
         value={tgtValue}
-        onModeChange={setTgtMode}
+        onModeChange={handleTgtModeChange}
         onValueChange={setTgtValue}
         secondaryText={tgtSecondary}
         hint="Leave blank to remove the target (stop-loss only)."
