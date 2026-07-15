@@ -37,7 +37,7 @@ services:
     staticPublishPath: ./frontend/dist
     envVars:
       - key: VITE_API_BASE_URL
-        value: https://stop-loss-trading-backend.onrender.com
+        value: https://agentic-stop-loss-trading.onrender.com
     routes:
       - type: rewrite
         source: /*
