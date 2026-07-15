@@ -8,11 +8,6 @@ import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
 
-function fmtDate(d: string | null) {
-  if (!d) return "—";
-  return new Date(d).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
-}
-
 function fmtDateOnly(d: string | null) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-IN", { dateStyle: "medium" });
@@ -30,7 +25,6 @@ type Column = {
 export default function TradeLogTable({
   onChanged,
   lockedStatus,
-  title,
 }: {
   onChanged?: () => void;
   lockedStatus?: "open" | "closed";
@@ -39,10 +33,10 @@ export default function TradeLogTable({
   const [trades, setTrades] = useState<Trade[]>([]);
   const [pnlByTradeId, setPnlByTradeId] = useState<Record<string, OpenPositionPnl>>({});
   const [agentNameById, setAgentNameById] = useState<Record<string, string>>({});
-  const [statusFilter, setStatusFilter] = useState(lockedStatus ?? "");
-  const [directionFilter, setDirectionFilter] = useState("");
-  const [exitReasonFilter, setExitReasonFilter] = useState("");
-  const [sourceFilter, setSourceFilter] = useState(""); // "agent" | "manual" | ""
+  const [statusFilter] = useState(lockedStatus ?? "");
+  const [directionFilter] = useState("");
+  const [exitReasonFilter] = useState("");
+  const [sourceFilter] = useState(""); // "agent" | "manual" | ""
   const [sortKey, setSortKey] = useState<SortKey>("purchase_date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [closingId, setClosingId] = useState<string | null>(null);
@@ -307,41 +301,6 @@ export default function TradeLogTable({
 
   return (
     <div className="panel">
-      {/* {title && (
-        <div className="panel-header">
-          <h3>{title}</h3>
-        </div>
-      )}
-      {!isOpenView && (
-        <div className="filters">
-          {!lockedStatus && (
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-              <option value="">All statuses</option>
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="error">Error</option>
-            </select>
-          )}
-          <select value={directionFilter} onChange={(e) => setDirectionFilter(e.target.value)}>
-            <option value="">All directions</option>
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-          <select value={exitReasonFilter} onChange={(e) => setExitReasonFilter(e.target.value)}>
-            <option value="">All exit reasons</option>
-            <option value="stop_loss">Stop-loss</option>
-            <option value="target">Target</option>
-            <option value="manual">Manual</option>
-            <option value="timeout">Timeout</option>
-          </select>
-          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-            <option value="">Agent + manual</option>
-            <option value="agent">Agent trades only</option>
-            <option value="manual">Manual trades only</option>
-          </select>
-        </div>
-      )} */}
-
       {sorted.length === 0 ? (
         <div className="empty-state">{isOpenView ? "No open trades yet" : "No trades match these filters"}</div>
       ) : (
