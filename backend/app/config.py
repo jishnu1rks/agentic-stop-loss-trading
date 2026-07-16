@@ -56,7 +56,7 @@ class Settings(BaseSettings):
 
     # CORS - comma-separated list of allowed frontend origins. Defaults to
     # local Vite dev server; set to the deployed frontend's URL in prod.
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,https://agentic-stop-loss-trading.vercel.app/"
 
 
 settings = Settings()
