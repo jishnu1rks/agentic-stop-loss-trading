@@ -96,12 +96,12 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
             value={risk.position_size_type}
             onChange={(e) => setRiskField("position_size_type", e.target.value as AgentRiskConfig["position_size_type"])}
           >
-            <option value="fixed_amount">Fixed amount (₹)</option>
+            <option value="fixed_amount">Fixed amount</option>
             <option value="pct_capital">% of daily capital</option>
           </select>
         </div>
         <div className="form-field">
-          <label>{risk.position_size_type === "fixed_amount" ? "Amount per trade (₹)" : "% per trade"}</label>
+          <label>{risk.position_size_type === "fixed_amount" ? "Amount per trade" : "% per trade"}</label>
           <input
             type="number"
             min={0}
@@ -122,7 +122,7 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
           />
         </div>
         <div className="form-field">
-          <label>Max daily capital (₹)</label>
+          <label>Max daily capital</label>
           <input
             type="number"
             min={0}

@@ -4,7 +4,7 @@ import type { Agent, Recommendation } from "../api/types";
 
 function fmtPrice(n: number | undefined | null) {
   if (n == null) return "—";
-  return `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  return `${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
 
 function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought?: () => void }) {

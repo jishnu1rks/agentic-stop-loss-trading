@@ -3,12 +3,14 @@ import { api } from "../api/client";
 import type { Agent, OpenPositionPnl, Trade } from "../api/types";
 import Modal from "./Modal";
 import EditProtectionModal from "./EditProtectionModal";
+import ChargesBreakdownModal from "./ChargesBreakdownModal";
+import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
 
-function fmtDate(d: string | null) {
+function fmtDateOnly(d: string | null) {
   if (!d) return "—";
-  return new Date(d).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  return new Date(d).toLocaleDateString("en-IN", { dateStyle: "medium" });
 }
 
 type Column = {
@@ -23,7 +25,6 @@ type Column = {
 export default function TradeLogTable({
   onChanged,
   lockedStatus,
-  title,
 }: {
   onChanged?: () => void;
   lockedStatus?: "open" | "closed";
@@ -32,15 +33,20 @@ export default function TradeLogTable({
   const [trades, setTrades] = useState<Trade[]>([]);
   const [pnlByTradeId, setPnlByTradeId] = useState<Record<string, OpenPositionPnl>>({});
   const [agentNameById, setAgentNameById] = useState<Record<string, string>>({});
-  const [statusFilter, setStatusFilter] = useState(lockedStatus ?? "");
-  const [directionFilter, setDirectionFilter] = useState("");
-  const [exitReasonFilter, setExitReasonFilter] = useState("");
-  const [sourceFilter, setSourceFilter] = useState(""); // "agent" | "manual" | ""
+  const [statusFilter] = useState(lockedStatus ?? "");
+  const [directionFilter] = useState("");
+  const [exitReasonFilter] = useState("");
+  const [sourceFilter] = useState(""); // "agent" | "manual" | ""
   const [sortKey, setSortKey] = useState<SortKey>("purchase_date");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [closingId, setClosingId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<Trade | null>(null);
   const [editTrade, setEditTrade] = useState<Trade | null>(null);
+  // Two distinct popups, each with its own state so they never bleed into
+  // each other: the charges & tax breakdown (History's Charges column) and
+  // the full trade-details breakdown (either view's P&L column).
+  const [chargesTrade, setChargesTrade] = useState<Trade | null>(null);
+  const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
 
   const isOpenView = lockedStatus === "open";
 
@@ -128,12 +134,19 @@ export default function TradeLogTable({
   // ---- Column definitions (header + cell stay in sync; ordering is just
   // the order of this list, so moving a column is a one-line move) ----
   const netPnlCell = (t: Trade, pnl?: OpenPositionPnl): ReactNode => {
-    if (t.status === "open") {
-      return pnl
-        ? `₹${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
-        : "—";
-    }
-    return t.net_profit != null ? `₹${t.net_profit.toFixed(2)}` : "—";
+    const text =
+      t.status === "open"
+        ? pnl
+          ? `${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
+          : "—"
+        : t.net_profit != null
+          ? `${t.net_profit.toFixed(2)}`
+          : "—";
+    return (
+      <button className="editable-cell" title="Click to view all trade details" onClick={() => setDetailsTrade(t)}>
+        {text}
+      </button>
+    );
   };
   const netPnlClass = (t: Trade, pnl?: OpenPositionPnl): string => {
     if (t.status === "open") return pnl ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : "";
@@ -153,12 +166,12 @@ export default function TradeLogTable({
     },
     currentPrice: {
       id: "current_price",
-      label: "Current price",
-      cell: (t, pnl) => (t.status === "open" && pnl ? `₹${pnl.current_price.toFixed(2)}` : "—"),
+      label: "CMP",
+      cell: (t, pnl) => (t.status === "open" && pnl ? `${pnl.current_price.toFixed(2)}` : "—"),
     },
     direction: {
       id: "direction",
-      label: "Direction",
+      label: "",
       sortKey: "direction",
       cell: (t) => <span className={`pill ${t.direction}`}>{t.direction}</span>,
     },
@@ -167,21 +180,16 @@ export default function TradeLogTable({
       id: "buy_price",
       label: "Buy price",
       sortKey: "buy_price",
-      cell: (t) => `₹${t.buy_price.toFixed(2)}`,
-    },
-    sellPrice: {
-      id: "sell_price",
-      label: "Sell price",
-      sortKey: "sell_price",
-      cell: (t) => (t.sell_price != null ? `₹${t.sell_price.toFixed(2)}` : "—"),
+      cell: (t) => `${t.buy_price.toFixed(2)}`,
     },
     stopLoss: {
       id: "stop_loss",
       label: "Stop loss",
       sortKey: "stop_loss_price",
-      cellClassName: () => "text-red",
       cell: (t) => {
-        const value = t.stop_loss_price ? `₹${t.stop_loss_price.toFixed(2)}` : "—";
+        const value = t.stop_loss_price
+          ? `${t.stop_loss_price.toFixed(2)}${t.stop_loss_pct ? ` (-${t.stop_loss_pct.toFixed(1)}%)` : ""}`
+          : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
             {value}
@@ -195,9 +203,11 @@ export default function TradeLogTable({
       id: "target",
       label: "Target",
       sortKey: "target_price",
-      cellClassName: () => "text-green",
       cell: (t) => {
-        const value = t.target_price != null ? `₹${t.target_price.toFixed(2)}` : "—";
+        const value =
+          t.target_price != null
+            ? `${t.target_price.toFixed(2)}${t.target_pct != null ? ` (${t.target_pct.toFixed(1)}%)` : ""}`
+            : "—";
         return t.status === "open" ? (
           <button className="editable-cell" title="Click to edit stop-loss / target" onClick={() => setEditTrade(t)}>
             {value}
@@ -207,40 +217,47 @@ export default function TradeLogTable({
         );
       },
     },
-    purchaseDate: {
-      id: "purchase_date",
-      label: "Purchase date",
+    buyDate: {
+      id: "buy_date",
+      label: "Buy date",
       sortKey: "purchase_date",
-      cell: (t) => fmtDate(t.purchase_date),
+      cell: (t) => fmtDateOnly(t.purchase_date),
     },
-    sellDate: { id: "sell_date", label: "Sell date", sortKey: "sell_date", cell: (t) => fmtDate(t.sell_date) },
+    sellDate: { id: "sell_date", label: "Sell date", sortKey: "sell_date", cell: (t) => fmtDateOnly(t.sell_date) },
+    investmentAmount: {
+      id: "investment_amount",
+      label: "Investment",
+      cell: (t) => `${(t.buy_price * t.quantity).toFixed(2)}`,
+    },
+    profitLoss: {
+      id: "profit_loss",
+      label: "Profit/Loss",
+      sortKey: "gross_profit",
+      cell: (t) => (t.gross_profit != null ? `${t.gross_profit.toFixed(2)}` : "—"),
+      cellClassName: (t) => (t.gross_profit != null ? (t.gross_profit >= 0 ? "text-green" : "text-red") : ""),
+    },
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
     charges: {
       id: "charges",
       label: "Charges",
       sortKey: "charges",
-      cell: (t) => (t.charges != null ? `₹${t.charges.toFixed(2)}` : "—"),
+      cell: (t) =>
+        t.charges != null ? (
+          <button className="editable-cell" title="Click to view charges & tax breakdown" onClick={() => setChargesTrade(t)}>
+            {t.charges.toFixed(2)}
+          </button>
+        ) : (
+          "—"
+        ),
     },
-    tax: { id: "tax", label: "Tax", sortKey: "tax", cell: (t) => (t.tax != null ? `₹${t.tax.toFixed(2)}` : "—") },
-    exitReason: { id: "exit_reason", label: "Exit reason", sortKey: "exit_reason", cell: (t) => t.exit_reason ?? "—" },
-    agent: {
-      id: "agent",
-      label: "Agent",
-      sortKey: "agent_id",
-      cell: (t) => (t.agent_id ? (agentNameById[t.agent_id] ?? t.agent_id) : "Manual"),
-    },
-    status: {
-      id: "status",
-      label: "Status",
-      sortKey: "status",
-      cell: (t) => <span className={`pill ${t.status}`}>{t.status}</span>,
-    },
-    tsl: {
-      id: "tsl",
-      label: "TSL",
-      headerTitle: "Reference only - the position still exits at the fixed Stop loss shown earlier",
-      cellClassName: () => "text-dim",
-      cell: (t, pnl) => (t.status === "open" && pnl ? `₹${pnl.trailing_stop_loss.toFixed(2)}` : "—"),
+    mode: {
+      id: "mode",
+      label: "Mode",
+      cell: (t) => (
+        <span title={t.is_manual ? "Manual" : (t.agent_id ? (agentNameById[t.agent_id] ?? t.agent_id) : "Agent")}>
+          {t.is_manual ? "👆" : "🤖"}
+        </span>
+      ),
     },
     actions: {
       id: "actions",
@@ -248,7 +265,7 @@ export default function TradeLogTable({
       cell: (t) =>
         t.status === "open" ? (
           <button className="btn btn-close" onClick={() => setConfirmClose(t)}>
-            Close
+            Exit
           </button>
         ) : null,
     },
@@ -261,76 +278,29 @@ export default function TradeLogTable({
   const columns: Column[] = isOpenView
     ? [
         cols.stock,
-        cols.currentPrice,
         cols.direction,
-        cols.qty,
         cols.buyPrice,
+        cols.qty,
+        cols.currentPrice,
         cols.stopLoss,
         cols.target,
         cols.netPnl,
-        cols.agent,
-        cols.status,
-        cols.tsl,
+        cols.mode,
         cols.actions,
       ]
     : [
         cols.stock,
-        cols.direction,
-        cols.qty,
-        cols.buyPrice,
-        cols.sellPrice,
-        cols.stopLoss,
-        cols.target,
-        cols.purchaseDate,
+        cols.buyDate,
         cols.sellDate,
-        cols.netPnl,
+        cols.investmentAmount,
+        cols.profitLoss,
         cols.charges,
-        cols.tax,
-        cols.exitReason,
-        cols.agent,
-        cols.status,
-        cols.currentPrice,
-        cols.tsl,
-        cols.actions,
+        cols.netPnl,
+        cols.mode,
       ];
 
   return (
     <div className="panel">
-      {title && (
-        <div className="panel-header">
-          <h3>{title}</h3>
-        </div>
-      )}
-      {!isOpenView && (
-        <div className="filters">
-          {!lockedStatus && (
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-              <option value="">All statuses</option>
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="error">Error</option>
-            </select>
-          )}
-          <select value={directionFilter} onChange={(e) => setDirectionFilter(e.target.value)}>
-            <option value="">All directions</option>
-            <option value="buy">Buy</option>
-            <option value="sell">Sell</option>
-          </select>
-          <select value={exitReasonFilter} onChange={(e) => setExitReasonFilter(e.target.value)}>
-            <option value="">All exit reasons</option>
-            <option value="stop_loss">Stop-loss</option>
-            <option value="target">Target</option>
-            <option value="manual">Manual</option>
-            <option value="timeout">Timeout</option>
-          </select>
-          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-            <option value="">Agent + manual</option>
-            <option value="agent">Agent trades only</option>
-            <option value="manual">Manual trades only</option>
-          </select>
-        </div>
-      )}
-
       {sorted.length === 0 ? (
         <div className="empty-state">{isOpenView ? "No open trades yet" : "No trades match these filters"}</div>
       ) : (
@@ -379,7 +349,7 @@ export default function TradeLogTable({
                 Cancel
               </button>
               <button className="btn btn-sell" onClick={() => handleClose(confirmClose.trade_id)} disabled={closingId != null}>
-                {closingId ? "Closing…" : "Close position"}
+                {closingId ? "Closing…" : "Close position"} 
               </button>
             </>
           }
@@ -398,6 +368,17 @@ export default function TradeLogTable({
           agentName={editTrade.agent_id ? (agentNameById[editTrade.agent_id] ?? editTrade.agent_id) : "Manual"}
           onClose={() => setEditTrade(null)}
           onSaved={afterEdit}
+        />
+      )}
+
+      {chargesTrade && <ChargesBreakdownModal trade={chargesTrade} onClose={() => setChargesTrade(null)} />}
+
+      {detailsTrade && (
+        <TradeDetailsModal
+          trade={detailsTrade}
+          pnl={pnlByTradeId[detailsTrade.trade_id]}
+          agentName={detailsTrade.agent_id ? (agentNameById[detailsTrade.agent_id] ?? detailsTrade.agent_id) : "Manual"}
+          onClose={() => setDetailsTrade(null)}
         />
       )}
     </div>

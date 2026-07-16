@@ -63,6 +63,7 @@ class TradeOut(BaseModel):
     sell_date: datetime | None
     stop_loss_pct: float
     stop_loss_price: float
+    target_pct: float | None
     target_price: float | None
     exit_reason: str | None
     gross_profit: float | None

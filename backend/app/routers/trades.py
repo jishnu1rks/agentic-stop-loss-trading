@@ -8,6 +8,7 @@ from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
 from app.agent_runtime import (
     close_trade_manually,
     enter_position,
+    estimate_trade_charges,
     get_capital_summary,
     get_open_positions_pnl,
     modify_protection,
@@ -48,6 +49,46 @@ def open_positions_pnl(db: Session = Depends(get_db)):
     agent_runtime.get_open_positions_pnl. Separate from the main trade
     listing since it needs a live market data fetch, not just a DB read."""
     return get_open_positions_pnl(db)
+
+
+@router.get("/quote/{symbol}")
+def get_quote(symbol: str):
+    """Live current price for a ticker, used by the Add Trade popup so the
+    user sees a price before committing to a quantity/stop-loss."""
+    sym = symbol.strip().upper()
+    try:
+        snapshot = get_market_data_adapter().get_snapshot([sym], lookback_days=1)
+    except MarketDataUnavailableError as exc:
+        raise HTTPException(503, f"Market data unavailable: {exc}") from exc
+
+    price = snapshot.prices.get(sym)
+    if price is None:
+        raise HTTPException(422, f"No price available for {sym}")
+    return {"symbol": sym, "price": round(price, 2)}
+
+
+@router.get("/{trade_id}/charges")
+def trade_charges(trade_id: str, db: Session = Depends(get_db)):
+    """Itemized charges/tax breakdown for the Net P&L popup - see
+    agent_runtime.estimate_trade_charges for closed-vs-open semantics."""
+    trade = db.query(Trade).filter(Trade.trade_id == trade_id).first()
+    if trade is None:
+        raise HTTPException(404, "Trade not found")
+
+    if trade.status == "closed":
+        if trade.sell_price is None:
+            raise HTTPException(400, "Closed trade is missing a sell price")
+        return estimate_trade_charges(trade, trade.sell_price)
+
+    try:
+        snapshot = get_market_data_adapter().get_snapshot([trade.stock_symbol], lookback_days=1)
+    except MarketDataUnavailableError as exc:
+        raise HTTPException(503, f"Market data unavailable: {exc}") from exc
+
+    price = snapshot.prices.get(trade.stock_symbol)
+    if price is None:
+        raise HTTPException(422, f"No price available for {trade.stock_symbol}")
+    return estimate_trade_charges(trade, price)
 
 
 @router.get("/{trade_id}", response_model=TradeOut)
