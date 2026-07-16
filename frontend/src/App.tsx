@@ -23,6 +23,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem("theme") as Theme) ?? "dark");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -48,13 +49,22 @@ function App() {
   return (
     <LoginGate>
       <div className="app-shell">
-        <Sidebar active={view} onChange={setView} />
+        <Sidebar active={view} onChange={setView} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
 
         <div className="main-content">
           <div className="app-header">
-            <div>
-              <h1>{TITLES[view]}</h1>
-              <div className="subtitle">Phase 1 simulation · paper trading against real/delayed market data</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button
+                className="hamburger-btn"
+                onClick={() => setMobileNavOpen(true)}
+                aria-label="Open navigation menu"
+              >
+                ☰
+              </button>
+              <div>
+                <h1>{TITLES[view]}</h1>
+                <div className="subtitle">Phase 1 simulation · paper trading against real/delayed market data</div>
+              </div>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button
