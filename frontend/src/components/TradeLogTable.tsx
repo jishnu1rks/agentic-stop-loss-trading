@@ -233,7 +233,14 @@ export default function TradeLogTable({
       id: "profit_loss",
       label: "Profit/Loss",
       sortKey: "gross_profit",
-      cell: (t) => (t.gross_profit != null ? `${t.gross_profit.toFixed(2)}` : "—"),
+      cell: (t) =>
+        t.gross_profit != null ? (
+          <button className="editable-cell" title="Click to view all trade details" onClick={() => setDetailsTrade(t)}>
+            {t.gross_profit.toFixed(2)}
+          </button>
+        ) : (
+          "—"
+        ),
       cellClassName: (t) => (t.gross_profit != null ? (t.gross_profit >= 0 ? "text-green" : "text-red") : ""),
     },
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },

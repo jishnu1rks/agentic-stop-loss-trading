@@ -585,3 +585,99 @@ tr:hover td {
 .editable-cell:hover {
   opacity: 0.75;
 }
+
+.hamburger-btn {
+  display: none;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  width: 38px;
+  height: 34px;
+  border-radius: 6px;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sidebar-overlay {
+  display: none;
+}
+
+/* ---- Responsive: tablet and down - sidebar becomes an off-canvas drawer ---- */
+@media (max-width: 768px) {
+  .hamburger-btn {
+    display: inline-flex;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 150;
+  }
+
+  .main-content {
+    max-width: 100%;
+    padding: 16px;
+  }
+
+  .app-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .app-header h1 {
+    font-size: 19px;
+  }
+
+  .kpi-grid,
+  .reco-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  .modal-overlay {
+    padding: 10px;
+  }
+}
+
+/* ---- Responsive: phones - stack labeled form fields instead of a fixed 140px width ---- */
+@media (max-width: 480px) {
+  .main-content {
+    padding: 12px;
+  }
+
+  .manual-trade-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .form-field input,
+  .form-field select {
+    width: 100%;
+  }
+
+  .panel-header > span {
+    max-width: 100%;
+    text-align: left;
+  }
+}

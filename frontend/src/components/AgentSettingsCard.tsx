@@ -13,7 +13,47 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
   const setRiskField = <K extends keyof AgentRiskConfig>(key: K, value: AgentRiskConfig[K]) =>
     setRisk((prev) => ({ ...prev, [key]: value }));
 
+  // Stop-loss/target are always % of entry price (CMP at fill time), never
+  // a currency amount - 0.1-5% keeps a fat-fingered config from arming a
+  // trade with, say, a 50% stop-loss. Mirrors the backend's AgentRiskConfig
+  // bounds so a rejected save doesn't need a round-trip to explain why.
+  const PCT_MIN = 0.1;
+  const PCT_MAX = 5;
+
+  const validate = (): string | null => {
+    if (risk.buy_stop_loss_pct < PCT_MIN || risk.buy_stop_loss_pct > PCT_MAX) {
+      return `Buy stop-loss % must be between ${PCT_MIN}% and ${PCT_MAX}%.`;
+    }
+    if (risk.sell_stop_loss_pct < PCT_MIN || risk.sell_stop_loss_pct > PCT_MAX) {
+      return `Sell stop-loss % must be between ${PCT_MIN}% and ${PCT_MAX}%.`;
+    }
+    if (risk.target_pct != null && (risk.target_pct < PCT_MIN || risk.target_pct > PCT_MAX)) {
+      return `Target % must be between ${PCT_MIN}% and ${PCT_MAX}%.`;
+    }
+    if (risk.position_size_value <= 0) {
+      return risk.position_size_type === "fixed_amount" ? "Amount per trade must be positive." : "% per trade must be positive.";
+    }
+    if (risk.position_size_type === "fixed_amount" && risk.position_size_value > risk.max_daily_capital) {
+      return "Amount per trade can't exceed max daily capital.";
+    }
+    if (risk.position_size_type === "pct_capital" && risk.position_size_value > 100) {
+      return "% per trade can't exceed 100%.";
+    }
+    if (risk.max_daily_capital <= 0) {
+      return "Max daily capital must be positive.";
+    }
+    if (risk.max_concurrent_positions < 1) {
+      return "Max concurrent positions must be at least 1.";
+    }
+    return null;
+  };
+
   const save = async () => {
+    const validationError = validate();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -64,31 +104,37 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
           <label>Buy stop-loss %</label>
           <input
             type="number"
-            min={0}
+            min={PCT_MIN}
+            max={PCT_MAX}
             step={0.1}
             value={risk.buy_stop_loss_pct}
             onChange={(e) => setRiskField("buy_stop_loss_pct", Number(e.target.value))}
           />
+          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
         </div>
         <div className="form-field">
           <label>Sell stop-loss %</label>
           <input
             type="number"
-            min={0}
+            min={PCT_MIN}
+            max={PCT_MAX}
             step={0.1}
             value={risk.sell_stop_loss_pct}
             onChange={(e) => setRiskField("sell_stop_loss_pct", Number(e.target.value))}
           />
+          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
         </div>
         <div className="form-field">
           <label>Target %</label>
           <input
             type="number"
-            min={0}
+            min={PCT_MIN}
+            max={PCT_MAX}
             step={0.1}
             value={risk.target_pct ?? ""}
             onChange={(e) => setRiskField("target_pct", e.target.value === "" ? null : Number(e.target.value))}
           />
+          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
         </div>
         <div className="form-field">
           <label>Position sizing</label>
