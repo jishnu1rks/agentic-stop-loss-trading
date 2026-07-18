@@ -4,11 +4,9 @@ import RecommendationsPanel from "../components/RecommendationsPanel";
 
 export default function DashboardPage({
   kpis,
-  refreshTick,
   onChanged,
 }: {
   kpis: Kpis | null;
-  refreshTick: number;
   onChanged: () => void;
 }) {
   return (
@@ -19,7 +17,7 @@ export default function DashboardPage({
         </div>
       )}
       <div className="section">
-        <RecommendationsPanel key={`reco-${refreshTick}`} onBought={onChanged} />
+        <RecommendationsPanel onBought={onChanged} />
       </div>
     </>
   );

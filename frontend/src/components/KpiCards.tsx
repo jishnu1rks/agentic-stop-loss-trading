@@ -42,8 +42,8 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
       </div>
 
       <div className="kpi-card">
-        <div className="label">Capital invested this month</div>
-        <div className="value">{fmtMoney(kpis.total_capital_invested_this_month)}</div>
+        <div className="label">Capital currently invested</div>
+        <div className="value">{fmtMoney(kpis.capital_deployed)}</div>
       </div>
 
       <div className="kpi-card">

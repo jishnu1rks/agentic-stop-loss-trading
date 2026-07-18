@@ -87,7 +87,7 @@ function App() {
 
           {error && <div className="error-banner">{error}</div>}
 
-          {view === "dashboard" && <DashboardPage kpis={kpis} refreshTick={refreshTick} onChanged={refreshAll} />}
+          {view === "dashboard" && <DashboardPage kpis={kpis} onChanged={refreshAll} />}
           {view === "open-trades" && <OpenTradesPage refreshTick={refreshTick} onChanged={refreshAll} />}
           {view === "history" && <HistoryPage refreshTick={refreshTick} />}
           {view === "agent-settings" && <AgentSettingsPage refreshTick={refreshTick} onChanged={refreshAll} />}

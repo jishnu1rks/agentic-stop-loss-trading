@@ -1,4 +1,5 @@
 from datetime import datetime, time
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -69,3 +70,41 @@ class YFinanceMarketDataAdapter(MarketDataAdapter):
         if now.weekday() >= 5:  # Sat/Sun
             return False
         return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+
+    def get_trending_symbols(
+        self,
+        sort_by: Literal["dayvolume", "percentchange"] = "dayvolume",
+        limit: int = 15,
+        min_market_cap: float = 5_000_000_000,
+    ) -> list[str]:
+        """Live NSE universe discovery via Yahoo's equity screener (Section 5.1
+        "screener" universe type) - an alternative to a hand-maintained
+        watchlist/index list. sort_by="dayvolume" surfaces today's most-active
+        names, "percentchange" surfaces today's biggest movers. min_market_cap
+        filters out illiquid/penny names that would otherwise dominate a
+        percentchange sort. This hits an unofficial Yahoo endpoint (same as
+        the rest of yfinance) - no SLA, and it can change shape without
+        notice, so failures are treated the same as any other market-data
+        outage rather than allowed to crash the scan."""
+        query = yf.EquityQuery(
+            "and",
+            [
+                yf.EquityQuery("eq", ["exchange", "NSI"]),
+                yf.EquityQuery("gt", ["intradaymarketcap", min_market_cap]),
+            ],
+        )
+        try:
+            result = yf.screen(query, count=limit, sortField=sort_by, sortAsc=False)
+        except Exception as exc:
+            raise MarketDataUnavailableError(f"Screener request failed: {exc}") from exc
+
+        quotes = result.get("quotes", [])
+        if not quotes:
+            raise MarketDataUnavailableError("Screener returned no NSE symbols")
+
+        symbols = []
+        for quote in quotes:
+            symbol = quote.get("symbol")
+            if symbol and symbol.endswith(".NS"):
+                symbols.append(symbol[: -len(".NS")])
+        return symbols[:limit]

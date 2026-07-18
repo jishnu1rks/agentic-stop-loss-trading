@@ -31,6 +31,9 @@ class FakeMarketDataAdapter(MarketDataAdapter):
     def is_market_open(self):
         return True
 
+    def get_trending_symbols(self, sort_by="dayvolume", limit=15, min_market_cap=5_000_000_000):
+        return list(self.prices.keys())[:limit]
+
 
 # ---- Section 4.1 stop-loss direction table ----
 

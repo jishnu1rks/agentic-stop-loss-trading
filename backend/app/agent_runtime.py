@@ -82,6 +82,26 @@ def _open_symbols(db: Session, agent_id: str) -> set[str]:
     return {r.stock_symbol for r in rows}
 
 
+def resolve_universe(config: dict, market_data_adapter) -> list[str]:
+    """Resolve an agent's configured universe into a concrete symbol list.
+    "watchlist"/"index" are just a stored list; "screener" (Section 5.1)
+    instead defers to the market data adapter's live top-N discovery, so the
+    universe is today's most-active/biggest-movers rather than a
+    hand-maintained list. May raise MarketDataUnavailableError - callers
+    already treat that as a fail-safe pause for get_snapshot, so it's raised
+    here rather than swallowed."""
+    universe_cfg = config["universe"]
+    if universe_cfg.get("type") == "screener":
+        screener = universe_cfg.get("screener") or {}
+        return market_data_adapter.get_trending_symbols(
+            sort_by=screener.get("sort_by", "dayvolume"),
+            limit=screener.get("limit", 15),
+            min_market_cap=screener.get("min_market_cap", 5_000_000_000),
+        )
+    value = universe_cfg["value"]
+    return value if isinstance(value, list) else [value]
+
+
 def get_capital_summary(db: Session) -> dict:
     """Account-wide capital tracking: a single static pool (Section 9-style
     hard constraint), shared across every agent and manual trades - not a
@@ -247,8 +267,7 @@ def build_momentum_recommendations(db: Session, agent: Agent, top_n: int = 10) -
     as such, rather than padding out to N with fabricated buy calls."""
     market_data_adapter = get_market_data_adapter()
     config = agent.config
-    universe_cfg = config["universe"]
-    universe = universe_cfg["value"] if isinstance(universe_cfg["value"], list) else [universe_cfg["value"]]
+    universe = resolve_universe(config, market_data_adapter)
     strategy_params = config.get("strategy_params", {})
     lookback_days = strategy_params.get("lookback_days", 20)
     breakout_threshold_pct = strategy_params.get("breakout_threshold_pct", 2.0)
@@ -529,10 +548,8 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         db.commit()
         return
 
-    universe_cfg = config["universe"]
-    universe = universe_cfg["value"] if isinstance(universe_cfg["value"], list) else [universe_cfg["value"]]
-
     try:
+        universe = resolve_universe(config, market_data_adapter)
         snapshot = market_data_adapter.get_snapshot(
             universe, lookback_days=config.get("strategy_params", {}).get("lookback_days", 20)
         )

@@ -2,6 +2,44 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { Agent, Recommendation } from "../api/types";
 
+const RECO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+
+// Module-level (not component state) so recommendations survive this panel
+// unmounting - it remounts on every dashboard view switch and on every
+// manual refresh - without re-hitting the recommendations endpoint each
+// time. Only a genuinely 15-minute-stale cache triggers a refetch.
+let recoCache: {
+  agents: Agent[];
+  recosByAgent: Record<string, Recommendation[]>;
+  fetchedAt: number;
+} | null = null;
+
+function fetchRecommendations(
+  setAgents: (agents: Agent[]) => void,
+  setRecosByAgent: (fn: (prev: Record<string, Recommendation[]>) => Record<string, Recommendation[]>) => void,
+) {
+  api.listAgents().then((all) => {
+    const momentumAgents = all.filter((a) => a.strategy === "momentum_breakout");
+    setAgents(momentumAgents);
+
+    const recosByAgent: Record<string, Recommendation[]> = {};
+    recoCache = { agents: momentumAgents, recosByAgent, fetchedAt: Date.now() };
+
+    momentumAgents.forEach((a) => {
+      api
+        .agentRecommendations(a.agent_id)
+        .then((recos) => {
+          recosByAgent[a.agent_id] = recos;
+          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: recos }));
+        })
+        .catch(() => {
+          recosByAgent[a.agent_id] = [];
+          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: [] }));
+        });
+    });
+  });
+}
+
 function fmtPrice(n: number | undefined | null) {
   if (n == null) return "—";
   return `${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -132,20 +170,24 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
 }
 
 export default function RecommendationsPanel({ onBought }: { onBought?: () => void }) {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [recosByAgent, setRecosByAgent] = useState<Record<string, Recommendation[]>>({});
+  const [agents, setAgents] = useState<Agent[]>(recoCache?.agents ?? []);
+  const [recosByAgent, setRecosByAgent] = useState<Record<string, Recommendation[]>>(
+    recoCache?.recosByAgent ?? {},
+  );
 
   useEffect(() => {
-    api.listAgents().then((all) => {
-      const momentumAgents = all.filter((a) => a.strategy === "momentum_breakout");
-      setAgents(momentumAgents);
-      momentumAgents.forEach((a) => {
-        api
-          .agentRecommendations(a.agent_id)
-          .then((recos) => setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: recos })))
-          .catch(() => setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: [] })));
-      });
-    });
+    const isStale = recoCache === null || Date.now() - recoCache.fetchedAt >= RECO_REFRESH_INTERVAL_MS;
+    if (isStale) {
+      fetchRecommendations(setAgents, setRecosByAgent);
+    }
+
+    // Keep refreshing on the same cadence for as long as the panel stays
+    // mounted, rather than only re-checking staleness on the next remount.
+    const interval = setInterval(
+      () => fetchRecommendations(setAgents, setRecosByAgent),
+      RECO_REFRESH_INTERVAL_MS,
+    );
+    return () => clearInterval(interval);
   }, []);
 
   const allRecos = agents.flatMap((a) => recosByAgent[a.agent_id] ?? []);

@@ -42,9 +42,27 @@ class AgentScheduleConfig(BaseModel):
     market_hours_only: bool = True
 
 
+class ScreenerUniverseConfig(BaseModel):
+    """Live NSE discovery instead of a hand-maintained symbol list (Section
+    5.1 "screener" universe type) - see YFinanceMarketDataAdapter.get_trending_symbols."""
+    sort_by: Literal["dayvolume", "percentchange"] = "dayvolume"
+    limit: int = Field(default=15, ge=1, le=50)
+    min_market_cap: float = Field(default=5_000_000_000, gt=0)
+
+
 class AgentUniverseConfig(BaseModel):
-    type: Literal["watchlist", "index"] = "watchlist"
-    value: list[str] | str
+    type: Literal["watchlist", "index", "screener"] = "watchlist"
+    value: list[str] | str | None = None
+    screener: ScreenerUniverseConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_value(self) -> "AgentUniverseConfig":
+        if self.type == "screener":
+            if self.screener is None:
+                self.screener = ScreenerUniverseConfig()
+        elif not self.value:
+            raise ValueError(f"universe.value is required for type '{self.type}'")
+        return self
 
 
 class AgentConfigIn(BaseModel):
