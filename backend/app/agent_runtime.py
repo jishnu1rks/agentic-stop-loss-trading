@@ -628,8 +628,15 @@ def close_trade_manually(db: Session, trade: Trade, current_price: float) -> Non
 def monitor_open_positions(db: Session) -> None:
     """Monitor -> Exit -> Log for every open trade, across all agents and
     manual trades (Section 4 step 5-7). Runs on its own scheduler cadence,
-    independent of each agent's scan interval."""
-    broker = get_broker_adapter()
+    independent of each agent's scan interval.
+
+    Exit triggers are evaluated directly against each Trade's persisted
+    stop_loss_price/target_price rather than the broker's in-memory GTT
+    bookkeeping: the simulator's GttOrder objects live only in process
+    memory and don't survive a restart, so a trade opened in a prior
+    process lifetime would otherwise never be checked again no matter how
+    far price moved past its levels.
+    """
     market_data_adapter = get_market_data_adapter()
 
     open_trades = db.query(Trade).filter(Trade.status == "open").all()
@@ -642,25 +649,35 @@ def monitor_open_positions(db: Session) -> None:
     except MarketDataUnavailableError:
         return  # fail-safe: skip this monitor cycle rather than act on nothing
 
-    fills = broker.check_and_fill_gtts(snapshot.prices)
-
-    by_gtt_id = {}
-    for trade in open_trades:
-        if trade.stop_loss_gtt_id:
-            by_gtt_id[trade.stop_loss_gtt_id] = (trade, "stop_loss")
-        if trade.target_gtt_id:
-            by_gtt_id[trade.target_gtt_id] = (trade, "target")
-
     closed_trade_ids = set()
-    for fill in fills:
-        match = by_gtt_id.get(fill.source_gtt_id)
-        if match is None:
+    for trade in open_trades:
+        price = snapshot.prices.get(trade.stock_symbol)
+        if price is None:
             continue
-        trade, reason = match
-        close_trade(db, trade, fill.price, fill.timestamp, reason)
-        _log(db, trade.agent_id, trade.stock_symbol, "exited", f"{reason} triggered at {fill.price}")
-        db.commit()
-        closed_trade_ids.add(trade.trade_id)
+
+        exit_reason = None
+        if trade.stop_loss_price:
+            hit = (
+                price <= trade.stop_loss_price
+                if trade.direction == "buy"
+                else price >= trade.stop_loss_price
+            )
+            if hit:
+                exit_reason = "stop_loss"
+        if exit_reason is None and trade.target_price:
+            hit = (
+                price >= trade.target_price
+                if trade.direction == "buy"
+                else price <= trade.target_price
+            )
+            if hit:
+                exit_reason = "target"
+
+        if exit_reason is not None:
+            force_close(db, trade, price, exit_reason)
+            _log(db, trade.agent_id, trade.stock_symbol, "exited", f"{exit_reason} triggered at {price}")
+            db.commit()
+            closed_trade_ids.add(trade.trade_id)
 
     # Time-based exit rule (Section 4 "Monitor... or a time-based exit rule
     # fires"), opt-in per agent via risk.max_hold_hours.
