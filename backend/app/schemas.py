@@ -20,20 +20,8 @@ class AgentRiskConfig(BaseModel):
     buy_stop_loss_pct: float = Field(ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
     sell_stop_loss_pct: float = Field(ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
     target_pct: float | None = Field(default=None, ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
-    position_size_type: Literal["fixed_amount", "pct_capital"] = "fixed_amount"
-    position_size_value: float
     max_concurrent_positions: int = Field(default=5, ge=1)
     max_daily_capital: float = Field(default=100_000.0, gt=0)
-
-    @model_validator(mode="after")
-    def _check_position_size(self) -> "AgentRiskConfig":
-        if self.position_size_value <= 0:
-            raise ValueError("position_size_value must be positive")
-        if self.position_size_type == "fixed_amount" and self.position_size_value > self.max_daily_capital:
-            raise ValueError("Amount per trade can't exceed max daily capital")
-        if self.position_size_type == "pct_capital" and self.position_size_value > 100:
-            raise ValueError("% per trade can't exceed 100%")
-        return self
 
 
 class AgentScheduleConfig(BaseModel):
@@ -72,8 +60,24 @@ class AgentConfigIn(BaseModel):
     universe: AgentUniverseConfig
     strategy: str
     strategy_params: dict[str, Any] = Field(default_factory=dict)
-    risk: AgentRiskConfig
+    # Recommend-only agents (llm_recommendation - Section 5.2's Recommending
+    # agent) never size or protect a position themselves, so they carry no
+    # risk config at all; every other strategy actually enters trades and
+    # must have one.
+    risk: AgentRiskConfig | None = None
     schedule: AgentScheduleConfig
+
+    @model_validator(mode="after")
+    def _check_llm_recommendation_prompt(self) -> "AgentConfigIn":
+        if self.strategy == "llm_recommendation" and not (self.strategy_params.get("prompt") or "").strip():
+            raise ValueError("strategy_params.prompt is required for the llm_recommendation strategy")
+        return self
+
+    @model_validator(mode="after")
+    def _check_risk_required_for_trading_strategies(self) -> "AgentConfigIn":
+        if self.strategy != "llm_recommendation" and self.risk is None:
+            raise ValueError("risk is required for a strategy that places trades")
+        return self
 
 
 class AgentOut(BaseModel):

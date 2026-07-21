@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.agent_runtime import build_momentum_recommendations, build_watchlist_recommendations
+from app.agent_runtime import (
+    build_llm_execution_recommendations,
+    build_llm_recommendations,
+    build_momentum_recommendations,
+    build_watchlist_recommendations,
+)
 from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
 from app.db import get_db
 from app.models import Agent, AgentLog
@@ -19,7 +24,7 @@ def _config_dict(payload: AgentConfigIn) -> dict:
         "universe": payload.universe.model_dump(),
         "strategy": payload.strategy,
         "strategy_params": payload.strategy_params,
-        "risk": payload.risk.model_dump(),
+        "risk": payload.risk.model_dump() if payload.risk is not None else None,
         "schedule": payload.schedule.model_dump(),
     }
 
@@ -141,6 +146,10 @@ def agent_recommendations(agent_id: str, top_n: int = 10, db: Session = Depends(
             return build_watchlist_recommendations(db, agent)
         if agent.strategy == "momentum_breakout":
             return build_momentum_recommendations(db, agent, top_n=top_n)
+        if agent.strategy == "llm_recommendation":
+            return build_llm_recommendations(db, agent)
+        if agent.strategy == "llm_recommendation_execution":
+            return build_llm_execution_recommendations(db, agent)
     except MarketDataUnavailableError as exc:
         raise HTTPException(503, f"Market data unavailable: {exc}") from exc
 

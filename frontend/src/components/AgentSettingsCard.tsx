@@ -2,10 +2,44 @@ import { useState } from "react";
 import { api } from "../api/client";
 import type { Agent, AgentRiskConfig, AgentScheduleConfig } from "../api/types";
 
+const STRATEGY_DESCRIPTIONS: Record<string, string> = {
+  llm_recommendation:
+    "Sends a live snapshot of its configured stocks to an AI model along with the trading prompt below, and asks it which symbols look worth buying or selling right now.",
+  llm_recommendation_execution:
+    "Mirrors the Recommending agent's AI-generated buy/sell signals exactly (same prompt, same stocks) - the Recommending agent only suggests, this one sizes, protects, and enters trades on those same signals using the risk settings below.",
+  momentum_breakout:
+    "Scans its configured stocks for names breaking out on strong price momentum and above-average volume, then automatically enters a trade the moment a breakout is confirmed.",
+  watchlist_trigger:
+    "Watches a fixed list of symbols you've configured and enters a trade only when price crosses the specific level you've set for that symbol.",
+};
+
+function strategyDescription(strategy: string): string {
+  return STRATEGY_DESCRIPTIONS[strategy] ?? "Scans its configured stocks on the schedule below and enters trades according to its configured strategy.";
+}
+
+// Mirrors MAX_TRADE_PCT_OF_DAILY_CAPITAL (backend/app/agent_runtime.py) -
+// no per-trade amount to configure, but no single trade may commit more
+// than this fraction of max_daily_capital either.
+const MAX_TRADE_PCT_OF_DAILY_CAPITAL = 0.25;
+
+// Only used as a throwaway initial value for recommend-only agents, which
+// carry no risk config at all (see AgentConfigIn.risk backend-side) - never
+// rendered or submitted for them.
+const DEFAULT_RISK: AgentRiskConfig = {
+  buy_stop_loss_pct: 2,
+  sell_stop_loss_pct: 2,
+  target_pct: null,
+  max_concurrent_positions: 5,
+  max_daily_capital: 50000,
+};
+
 export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; onSaved: () => void }) {
-  const [active, setActive] = useState(agent.active);
-  const [risk, setRisk] = useState<AgentRiskConfig>(agent.config.risk);
+  const [risk, setRisk] = useState<AgentRiskConfig>(agent.config.risk ?? DEFAULT_RISK);
   const [schedule, setSchedule] = useState<AgentScheduleConfig>(agent.config.schedule);
+  const isLlmRecommendation = agent.strategy === "llm_recommendation";
+  const [prompt, setPrompt] = useState(
+    isLlmRecommendation ? String(agent.config.strategy_params.prompt ?? "") : ""
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -21,6 +55,9 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
   const PCT_MAX = 5;
 
   const validate = (): string | null => {
+    if (isLlmRecommendation) {
+      return !prompt.trim() ? "Prompt is required for a recommendation agent." : null;
+    }
     if (risk.buy_stop_loss_pct < PCT_MIN || risk.buy_stop_loss_pct > PCT_MAX) {
       return `Buy stop-loss % must be between ${PCT_MIN}% and ${PCT_MAX}%.`;
     }
@@ -29,15 +66,6 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
     }
     if (risk.target_pct != null && (risk.target_pct < PCT_MIN || risk.target_pct > PCT_MAX)) {
       return `Target % must be between ${PCT_MIN}% and ${PCT_MAX}%.`;
-    }
-    if (risk.position_size_value <= 0) {
-      return risk.position_size_type === "fixed_amount" ? "Amount per trade must be positive." : "% per trade must be positive.";
-    }
-    if (risk.position_size_type === "fixed_amount" && risk.position_size_value > risk.max_daily_capital) {
-      return "Amount per trade can't exceed max daily capital.";
-    }
-    if (risk.position_size_type === "pct_capital" && risk.position_size_value > 100) {
-      return "% per trade can't exceed 100%.";
     }
     if (risk.max_daily_capital <= 0) {
       return "Max daily capital must be positive.";
@@ -60,12 +88,16 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
       await api.updateAgent(agent.agent_id, {
         agent_id: agent.agent_id,
         name: agent.name,
-        active,
+        // Agents are always active - trading happens on its own schedule
+        // during market hours, with no manual on/off switch in this UI.
+        active: true,
         universe: agent.config.universe,
         strategy: agent.strategy,
-        strategy_params: agent.config.strategy_params,
-        risk,
-        schedule,
+        strategy_params: isLlmRecommendation
+          ? { ...agent.config.strategy_params, prompt }
+          : agent.config.strategy_params,
+        risk: isLlmRecommendation ? null : risk,
+        schedule: { ...schedule, market_hours_only: true },
       });
       setSavedAt(Date.now());
       onSaved();
@@ -77,123 +109,126 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
     }
   };
 
-  const universeSummary =
-    agent.config.universe.type === "watchlist"
-      ? `Watchlist: ${(agent.config.universe.value as string[]).join(", ")}`
-      : `Index: ${agent.config.universe.value}`;
+  const universeSummary = (() => {
+    const universe = agent.config.universe;
+    if (universe.type === "screener") {
+      const s = universe.screener;
+      const sortLabel = s?.sort_by === "percentchange" ? "% change" : "day volume";
+      return `Screener: top ${s?.limit ?? 15} NSE stocks by ${sortLabel}, min market cap ₹${((s?.min_market_cap ?? 5_000_000_000) / 10_000_000).toLocaleString("en-IN")} Cr`;
+    }
+    if (universe.type === "watchlist") {
+      return `Watchlist: ${(universe.value as string[]).join(", ")}`;
+    }
+    return `Index: ${universe.value}`;
+  })();
 
   return (
     <div className="panel" style={{ marginBottom: 20 }}>
       <div className="panel-header">
         <div>
           <strong>{agent.name}</strong>
-          <div className="text-dim" style={{ fontSize: 12, marginTop: 2 }}>
+          {/* <div className="text-dim" style={{ fontSize: 12, marginTop: 2 }}>
             {agent.agent_id} · {agent.strategy} · {universeSummary}
-          </div>
+          </div> */}
         </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-          <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-          Active
-        </label>
       </div>
+
+      <div className="agent-description">{strategyDescription(agent.strategy)}</div>
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="manual-trade-form" style={{ marginBottom: 16 }}>
-        <div className="form-field">
-          <label>Buy stop-loss %</label>
-          <input
-            type="number"
-            min={PCT_MIN}
-            max={PCT_MAX}
-            step={0.1}
-            value={risk.buy_stop_loss_pct}
-            onChange={(e) => setRiskField("buy_stop_loss_pct", Number(e.target.value))}
+      {isLlmRecommendation && (
+        <div className="form-field" style={{ marginBottom: 16 }}>
+          <label>Trading prompt</label>
+          <textarea
+            rows={5}
+            style={{ width: "100%", fontFamily: "inherit", fontSize: 13 }}
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Describe the entry criteria this agent should look for, e.g. 'Buy NSE large-caps that dropped more than 3% today on above-average volume with no negative news.'"
           />
-          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
+          <span className="field-hint">
+            Sent to the model on every scan alongside a live price/volume snapshot of this agent's configured stocks.
+          </span>
         </div>
-        <div className="form-field">
-          <label>Sell stop-loss %</label>
-          <input
-            type="number"
-            min={PCT_MIN}
-            max={PCT_MAX}
-            step={0.1}
-            value={risk.sell_stop_loss_pct}
-            onChange={(e) => setRiskField("sell_stop_loss_pct", Number(e.target.value))}
-          />
-          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
-        </div>
-        <div className="form-field">
-          <label>Target %</label>
-          <input
-            type="number"
-            min={PCT_MIN}
-            max={PCT_MAX}
-            step={0.1}
-            value={risk.target_pct ?? ""}
-            onChange={(e) => setRiskField("target_pct", e.target.value === "" ? null : Number(e.target.value))}
-          />
-          <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
-        </div>
-        <div className="form-field">
-          <label>Position sizing</label>
-          <select
-            value={risk.position_size_type}
-            onChange={(e) => setRiskField("position_size_type", e.target.value as AgentRiskConfig["position_size_type"])}
-          >
-            <option value="fixed_amount">Fixed amount</option>
-            <option value="pct_capital">% of daily capital</option>
-          </select>
-        </div>
-        <div className="form-field">
-          <label>{risk.position_size_type === "fixed_amount" ? "Amount per trade" : "% per trade"}</label>
-          <input
-            type="number"
-            min={0}
-            value={risk.position_size_value}
-            onChange={(e) => setRiskField("position_size_value", Number(e.target.value))}
-          />
-        </div>
-      </div>
+      )}
 
-      <div className="manual-trade-form" style={{ marginBottom: 16 }}>
-        <div className="form-field">
-          <label>Max concurrent positions</label>
-          <input
-            type="number"
-            min={1}
-            value={risk.max_concurrent_positions}
-            onChange={(e) => setRiskField("max_concurrent_positions", Number(e.target.value))}
-          />
-        </div>
-        <div className="form-field">
-          <label>Max daily capital</label>
-          <input
-            type="number"
-            min={0}
-            value={risk.max_daily_capital}
-            onChange={(e) => setRiskField("max_daily_capital", Number(e.target.value))}
-          />
-        </div>
-        <div className="form-field">
-          <label>Scan interval (minutes)</label>
-          <input
-            type="number"
-            min={1}
-            value={schedule.interval_minutes}
-            onChange={(e) => setSchedule((prev) => ({ ...prev, interval_minutes: Number(e.target.value) }))}
-          />
-        </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, paddingBottom: 8 }}>
-          <input
-            type="checkbox"
-            checked={schedule.market_hours_only}
-            onChange={(e) => setSchedule((prev) => ({ ...prev, market_hours_only: e.target.checked }))}
-          />
-          Market hours only
-        </label>
-      </div>
+      {!isLlmRecommendation && (
+        <>
+          <div className="manual-trade-form" style={{ marginBottom: 16 }}>
+            <div className="form-field">
+              <label>Buy stop-loss %</label>
+              <input
+                type="number"
+                min={PCT_MIN}
+                max={PCT_MAX}
+                step={0.1}
+                value={risk.buy_stop_loss_pct}
+                onChange={(e) => setRiskField("buy_stop_loss_pct", Number(e.target.value))}
+              />
+              <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
+            </div>
+            <div className="form-field">
+              <label>Sell stop-loss %</label>
+              <input
+                type="number"
+                min={PCT_MIN}
+                max={PCT_MAX}
+                step={0.1}
+                value={risk.sell_stop_loss_pct}
+                onChange={(e) => setRiskField("sell_stop_loss_pct", Number(e.target.value))}
+              />
+              <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
+            </div>
+            <div className="form-field">
+              <label>Target %</label>
+              <input
+                type="number"
+                min={PCT_MIN}
+                max={PCT_MAX}
+                step={0.1}
+                value={risk.target_pct ?? ""}
+                onChange={(e) => setRiskField("target_pct", e.target.value === "" ? null : Number(e.target.value))}
+              />
+              <span className="field-hint">{PCT_MIN}% - {PCT_MAX}%</span>
+            </div>
+          </div>
+
+          <div className="manual-trade-form" style={{ marginBottom: 16 }}>
+            <div className="form-field">
+              <label>Max concurrent positions</label>
+              <input
+                type="number"
+                min={1}
+                value={risk.max_concurrent_positions}
+                onChange={(e) => setRiskField("max_concurrent_positions", Number(e.target.value))}
+              />
+            </div>
+            <div className="form-field">
+              <label>Max daily capital</label>
+              <input
+                type="number"
+                min={0}
+                value={risk.max_daily_capital}
+                onChange={(e) => setRiskField("max_daily_capital", Number(e.target.value))}
+              />
+              <span className="field-hint">
+                Each trade uses whatever's available, capped at {MAX_TRADE_PCT_OF_DAILY_CAPITAL * 100}% of this per
+                trade (≈{Math.round(risk.max_daily_capital * MAX_TRADE_PCT_OF_DAILY_CAPITAL).toLocaleString("en-IN")})
+              </span>
+            </div>
+            <div className="form-field">
+              <label>Scan interval (minutes)</label>
+              <input
+                type="number"
+                min={1}
+                value={schedule.interval_minutes}
+                onChange={(e) => setSchedule((prev) => ({ ...prev, interval_minutes: Number(e.target.value) }))}
+              />
+            </div>
+          </div>
+        </>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button className="btn btn-buy" disabled={saving} onClick={save}>

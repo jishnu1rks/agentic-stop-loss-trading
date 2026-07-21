@@ -108,3 +108,30 @@ class YFinanceMarketDataAdapter(MarketDataAdapter):
             if symbol and symbol.endswith(".NS"):
                 symbols.append(symbol[: -len(".NS")])
         return symbols[:limit]
+
+    def get_fundamentals(self, symbol: str) -> dict | None:
+        """Pulls the subset of yf.Ticker(...).info that's reliably populated
+        for NSE names: valuation (P/E, P/B, PEG), Debt/Equity, market cap,
+        insider-holding % (the closest available proxy for promoter holding),
+        and trailing revenue/earnings growth. ROE, ROCE, free cash flow,
+        interest coverage, and promoter pledging/governance data are NOT
+        reliably available from this source for Indian tickers and are
+        deliberately left out here rather than reported as fake/stale data -
+        app.fundamentals.score_fundamentals only scores what's present."""
+        try:
+            info = yf.Ticker(_to_yf_symbol(symbol)).info
+        except Exception:
+            return None
+        if not info or info.get("marketCap") is None:
+            return None
+        return {
+            "pe": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "pb": info.get("priceToBook"),
+            "peg": info.get("pegRatio"),
+            "debt_to_equity": info.get("debtToEquity"),
+            "market_cap": info.get("marketCap"),
+            "insider_holding_pct": info.get("heldPercentInsiders"),
+            "revenue_growth": info.get("revenueGrowth"),
+            "earnings_growth": info.get("earningsGrowth"),
+        }

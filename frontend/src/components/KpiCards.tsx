@@ -21,7 +21,7 @@ export default function KpiCards({ kpis }: { kpis: Kpis }) {
       </div>
 
       <div className="kpi-card">
-        <div className="label">Net profit</div>
+        <div className="label">Net P & L</div>
         <div className={`value ${kpis.total_net_profit_all_time >= 0 ? "positive" : "negative"}`}>
           {fmtMoney(kpis.total_net_profit_all_time)}
         </div>

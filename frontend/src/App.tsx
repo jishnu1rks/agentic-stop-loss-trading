@@ -7,6 +7,7 @@ import DashboardPage from "./pages/DashboardPage";
 import OpenTradesPage from "./pages/OpenTradesPage";
 import HistoryPage from "./pages/HistoryPage";
 import AgentSettingsPage from "./pages/AgentSettingsPage";
+import TradeToasts from "./components/TradeToasts";
 
 const TITLES: Record<View, string> = {
   dashboard: "Dashboard",
@@ -48,6 +49,10 @@ function App() {
 
   return (
     <LoginGate>
+      <TradeToasts />
+      <div className="warning-banner">
+        <strong>Agents can make mistakes.</strong> Recommendations to be considered cautiously.
+      </div>
       <div className="app-shell">
         <Sidebar active={view} onChange={setView} mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
 
@@ -63,7 +68,7 @@ function App() {
               </button>
               <div>
                 <h1>{TITLES[view]}</h1>
-                <div className="subtitle">Phase 1 simulation · paper trading against real/delayed market data</div>
+                {/* <div className="subtitle">Phase 1 simulation · paper trading against real/delayed market data</div> */}
               </div>
             </div>
             <div style={{ display: "flex", gap: 10 }}>

@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     kite_api_secret: str | None = None
     kite_access_token: str | None = None
 
+    # LLM-driven "recommendation" agents (llm_recommendation strategy) - the
+    # per-agent trading prompt is configurable (Section 5.2), but the model
+    # provider itself is an operator setting, not exposed in the agent config
+    # UI. llm_provider picks which of the two credential pairs below is used.
+    llm_provider: str = "anthropic"  # anthropic | gemini
+    anthropic_api_key: str | None = None
+    recommendation_model: str = "claude-opus-4-8"
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
+
     # Simulated fill behavior
     simulator_slippage_pct: float = 0.0
 

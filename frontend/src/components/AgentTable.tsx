@@ -11,7 +11,6 @@ export default function AgentTable({ agents }: { agents: AgentBreakdown[] }) {
             <thead>
               <tr>
                 <th>Agent</th>
-                <th>Status</th>
                 <th>Trades</th>
                 <th>Win rate</th>
                 <th>Net profit</th>
@@ -22,9 +21,6 @@ export default function AgentTable({ agents }: { agents: AgentBreakdown[] }) {
               {agents.map((a) => (
                 <tr key={a.agent_id}>
                   <td>{a.name}</td>
-                  <td>
-                    <span className={`pill ${a.active ? "buy" : "closed"}`}>{a.active ? "active" : "inactive"}</span>
-                  </td>
                   <td>{a.trades_count}</td>
                   <td>{a.win_rate_pct.toFixed(1)}%</td>
                   <td className={a.net_profit >= 0 ? "text-green" : "text-red"}>

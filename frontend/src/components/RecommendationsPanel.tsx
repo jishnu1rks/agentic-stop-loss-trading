@@ -3,37 +3,67 @@ import { api } from "../api/client";
 import type { Agent, Recommendation } from "../api/types";
 
 const RECO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+const RECO_CACHE_STORAGE_KEY = "reco-cache-v1";
 
-// Module-level (not component state) so recommendations survive this panel
-// unmounting - it remounts on every dashboard view switch and on every
-// manual refresh - without re-hitting the recommendations endpoint each
-// time. Only a genuinely 15-minute-stale cache triggers a refetch.
-let recoCache: {
+type RecoCache = {
   agents: Agent[];
   recosByAgent: Record<string, Recommendation[]>;
   fetchedAt: number;
-} | null = null;
+};
+
+function loadPersistedRecoCache(): RecoCache | null {
+  try {
+    const raw = localStorage.getItem(RECO_CACHE_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as RecoCache) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistRecoCache(cache: RecoCache) {
+  try {
+    localStorage.setItem(RECO_CACHE_STORAGE_KEY, JSON.stringify(cache));
+  } catch {
+    // localStorage unavailable/full - the in-memory cache below still works for this tab.
+  }
+}
+
+// Module-level (not component state), seeded from localStorage, so
+// recommendations survive both this panel unmounting (dashboard view
+// switches) and a full page reload - without re-hitting the recommendations
+// endpoint each time. Only a genuinely 15-minute-stale cache triggers a
+// refetch; until then, every remount/reload renders straight from here.
+let recoCache: RecoCache | null = loadPersistedRecoCache();
 
 function fetchRecommendations(
   setAgents: (agents: Agent[]) => void,
   setRecosByAgent: (fn: (prev: Record<string, Recommendation[]>) => Record<string, Recommendation[]>) => void,
 ) {
   api.listAgents().then((all) => {
-    const momentumAgents = all.filter((a) => a.strategy === "momentum_breakout");
-    setAgents(momentumAgents);
+    const recoAgents = all.filter(
+      (a) =>
+        a.strategy === "momentum_breakout" ||
+        a.strategy === "llm_recommendation" ||
+        a.strategy === "llm_recommendation_execution",
+    );
+    setAgents(recoAgents);
 
     const recosByAgent: Record<string, Recommendation[]> = {};
-    recoCache = { agents: momentumAgents, recosByAgent, fetchedAt: Date.now() };
+    recoCache = { agents: recoAgents, recosByAgent, fetchedAt: Date.now() };
+    persistRecoCache(recoCache);
 
-    momentumAgents.forEach((a) => {
+    recoAgents.forEach((a) => {
       api
         .agentRecommendations(a.agent_id)
         .then((recos) => {
-          recosByAgent[a.agent_id] = recos;
-          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: recos }));
+          const tagged = recos.map((r) => ({ ...r, strategy: a.strategy }));
+          recosByAgent[a.agent_id] = tagged;
+          persistRecoCache(recoCache!);
+          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: tagged }));
         })
         .catch(() => {
           recosByAgent[a.agent_id] = [];
+          persistRecoCache(recoCache!);
           setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: [] }));
         });
     });
@@ -44,6 +74,8 @@ function fmtPrice(n: number | undefined | null) {
   if (n == null) return "—";
   return `${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 }
+
+const CAP_SIZE_LABELS: Record<string, string> = { large: "Large cap", mid: "Mid cap", small: "Small cap" };
 
 function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought?: () => void }) {
   const [buying, setBuying] = useState(false);
@@ -65,8 +97,66 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
     );
   }
 
+  const isIdeaOnly = reco.strategy === "llm_recommendation";
+  const isLlmSignal = reco.strategy === "llm_recommendation_execution";
   const confirmed = reco.in_signal === true;
   const canBuy = (reco.quantity ?? 0) > 0 && !reco.already_open;
+
+  if (isIdeaOnly) {
+    return (
+      <div className="reco-card">
+        <div className="reco-header">
+          <div className="reco-avatar">{reco.symbol.slice(0, 2)}</div>
+          <div>
+            <div className="reco-symbol">{reco.symbol}</div>
+            <div className="reco-timestamp">
+              {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+              {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
+            </div>
+          </div>
+          <span className={`pill ${reco.direction === "sell" ? "sell" : "buy"}`}>
+            {reco.direction === "sell" ? "SELL IDEA" : "BUY IDEA"}
+          </span>
+        </div>
+
+        <div className="reco-cmp-row">
+          <div>
+            <div className="reco-cmp-label">CMP</div>
+            <div className="reco-cmp-value">{fmtPrice(reco.cmp)}</div>
+          </div>
+        </div>
+
+        <div className="reco-detail-grid">
+          <div>
+            <div className="reco-detail-label">Prior high</div>
+            <div className="reco-detail-value">{fmtPrice(reco.prior_high)}</div>
+          </div>
+          <div>
+            <div className="reco-detail-label">Target (+upside)</div>
+            <div className="reco-detail-value text-green">
+              {fmtPrice(reco.target_price)}
+              {reco.upside_pct != null ? ` (+${reco.upside_pct.toFixed(1)}%)` : ""}
+            </div>
+          </div>
+          <div>
+            <div className="reco-detail-label">Stop loss</div>
+            <div className="reco-detail-value text-red">{fmtPrice(reco.stop_loss_price)}</div>
+          </div>
+          <div>
+            <div className="reco-detail-label">Qty (at this size)</div>
+            <div className="reco-detail-value">{reco.quantity}</div>
+          </div>
+        </div>
+
+        <div className="reco-rationale">{reco.rationale}</div>
+        {reco.already_open && <div className="reco-open-badge">● Position already open for this symbol</div>}
+        <div className="field-hint" style={{ marginTop: 10 }}>
+          Idea only - illustrative target/stop-loss/qty, this agent doesn't place trades. Use a manual trade or an
+          Execution agent to act on it.
+        </div>
+      </div>
+    );
+  }
 
   const handleBuy = async () => {
     setBuying(true);
@@ -98,9 +188,22 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
         <div className="reco-avatar">{reco.symbol.slice(0, 2)}</div>
         <div>
           <div className="reco-symbol">{reco.symbol}</div>
-          <div className="reco-timestamp">{new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</div>
+          <div className="reco-timestamp">
+            {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
+            {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
+          </div>
         </div>
-        <span className={`pill ${confirmed ? "buy" : "open"}`}>{confirmed ? "BREAKOUT" : "WATCHING"}</span>
+        <span
+          className={`pill ${isLlmSignal ? (reco.direction === "sell" ? "sell" : "buy") : confirmed ? "buy" : "open"}`}
+        >
+          {isLlmSignal
+            ? reco.direction === "sell"
+              ? "SELL SIGNAL"
+              : "BUY SIGNAL"
+            : confirmed
+              ? "BREAKOUT"
+              : "WATCHING"}
+        </span>
       </div>
 
       <div className="reco-progress-track">
@@ -198,21 +301,21 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
     <div className="panel">
       <div className="panel-header">
         <h3>Latest Recommendations</h3>
-        <span className="text-dim" style={{ fontSize: 12 }}>
-          Momentum breakout scan across the agent's universe (live NSE prices)
-        </span>
+        {/* <span className="text-dim" style={{ fontSize: 12 }}>
+          Live scan across each agent's configured stocks (momentum breakout and AI recommendation agents)
+        </span> */}
       </div>
       {agents.length === 0 ? (
-        <div className="empty-state">No momentum_breakout agents configured yet</div>
+        <div className="empty-state">No recommendation agents configured yet</div>
       ) : !loaded ? (
-        <div className="empty-state">Scanning</div>
+        <div className="empty-state">fetching recommendations...</div>
       ) : allRecos.length === 0 ? (
-        <div className="empty-state">No candidates found.</div>
+        <div className="empty-state">No results found.</div>
       ) : (
         <>
           {confirmedCount === 0 && (
             <div className="reco-rationale" style={{ marginBottom: 12, borderTop: "none", paddingTop: 0 }}>
-              No confirmed breakouts right now - showing the closest candidates, ranked, none of these have actually
+              No confirmed breakouts right now - showing the closest matches, ranked, none of these have actually
               cleared the breakout threshold with volume confirmation yet.
             </div>
           )}

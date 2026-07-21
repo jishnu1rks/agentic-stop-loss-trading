@@ -35,3 +35,11 @@ class MarketDataAdapter(ABC):
         """Discover a live universe (e.g. today's most-active or biggest
         movers) rather than relying on a hand-maintained watchlist/index -
         the "screener" universe type (Section 5.1)."""
+
+    @abstractmethod
+    def get_fundamentals(self, symbol: str) -> dict | None:
+        """Point-in-time valuation/financial-health snapshot for one symbol,
+        used to apply a standard recommendability screen to a "screener"
+        universe (see app.fundamentals). Returns None if nothing usable came
+        back for this symbol - callers must treat that as "unknown", not as
+        a failing score."""
