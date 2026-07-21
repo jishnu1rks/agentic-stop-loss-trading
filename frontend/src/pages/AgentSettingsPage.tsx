@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { Agent, AgentBreakdown } from "../api/types";
+import type { Agent } from "../api/types";
 import AgentSettingsCard from "../components/AgentSettingsCard";
 import AgentStatusLegend from "../components/AgentStatusLegend";
-import AgentTable from "../components/AgentTable";
 
 // Recommendation agents (llm_recommendation) only ever suggest ideas - they
 // read most naturally as the "front page" of this list, ahead of agents that
@@ -15,11 +14,9 @@ function byRecommendationFirst(a: Agent, b: Agent): number {
 
 export default function AgentSettingsPage({ refreshTick, onChanged }: { refreshTick: number; onChanged: () => void }) {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [breakdown, setBreakdown] = useState<AgentBreakdown[]>([]);
 
   const load = () => {
     api.listAgents().then(setAgents).catch(() => setAgents([]));
-    api.agentsBreakdown().then(setBreakdown).catch(() => setBreakdown([]));
   };
 
   useEffect(load, [refreshTick]);

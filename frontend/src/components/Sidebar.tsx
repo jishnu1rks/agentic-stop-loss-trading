@@ -1,4 +1,5 @@
 import type { SVGProps } from "react";
+import React from "react";
 
 export type View = "dashboard" | "open-trades" | "history" | "agent-settings";
 
@@ -53,7 +54,7 @@ function AgentSettingsIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-const ITEMS: { key: View; label: string; icon: (props: SVGProps<SVGSVGElement>) => JSX.Element }[] = [
+const ITEMS: { key: View; label: string; icon: (props: SVGProps<SVGSVGElement>) => React.ReactElement }[] = [
   { key: "dashboard", label: "Dashboard", icon: DashboardIcon },
   { key: "open-trades", label: "Open trades", icon: OpenTradesIcon },
   { key: "history", label: "History", icon: HistoryIcon },

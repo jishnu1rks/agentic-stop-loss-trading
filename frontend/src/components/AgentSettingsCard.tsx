@@ -109,18 +109,7 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
     }
   };
 
-  const universeSummary = (() => {
-    const universe = agent.config.universe;
-    if (universe.type === "screener") {
-      const s = universe.screener;
-      const sortLabel = s?.sort_by === "percentchange" ? "% change" : "day volume";
-      return `Screener: top ${s?.limit ?? 15} NSE stocks by ${sortLabel}, min market cap ₹${((s?.min_market_cap ?? 5_000_000_000) / 10_000_000).toLocaleString("en-IN")} Cr`;
-    }
-    if (universe.type === "watchlist") {
-      return `Watchlist: ${(universe.value as string[]).join(", ")}`;
-    }
-    return `Index: ${universe.value}`;
-  })();
+
 
   return (
     <div className="panel" style={{ marginBottom: 20 }}>
