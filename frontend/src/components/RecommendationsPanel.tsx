@@ -308,7 +308,20 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
 
   const allRecos = agents.flatMap((a) => recosByAgent[a.agent_id] ?? []);
   const loaded = agents.length > 0 && agents.every((a) => a.agent_id in recosByAgent);
-  const filteredRecos = capFilter === "all" ? allRecos : allRecos.filter((r) => r.cap_size === capFilter);
+
+  // An Execution agent mirrors the Recommending agent's own signals, so a
+  // symbol that already has an actionable BUY/SELL SIGNAL card doesn't also
+  // need the non-actionable idea-only card for the same symbol - it's the
+  // same underlying recommendation, and showing both is just confusing
+  // duplication rather than new information.
+  const executionSymbols = new Set(
+    allRecos.filter((r) => r.strategy === "llm_recommendation_execution").map((r) => r.symbol),
+  );
+  const dedupedRecos = allRecos.filter(
+    (r) => !(r.strategy === "llm_recommendation" && executionSymbols.has(r.symbol)),
+  );
+
+  const filteredRecos = capFilter === "all" ? dedupedRecos : dedupedRecos.filter((r) => r.cap_size === capFilter);
   const confirmedCount = filteredRecos.filter((r) => r.in_signal).length;
 
   return (

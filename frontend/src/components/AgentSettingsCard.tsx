@@ -188,7 +188,7 @@ export default function AgentSettingsCard({
           <label>Trading prompt</label>
           <textarea
             rows={5}
-            style={{ width: "100%", fontFamily: "inherit", fontSize: 13 }}
+            style={{ width: "100%", fontFamily: "inherit" }}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Describe the entry criteria this agent should look for, e.g. 'Buy NSE large-caps that dropped more than 3% today on above-average volume with no negative news.'"
@@ -205,7 +205,7 @@ export default function AgentSettingsCard({
           <textarea
             rows={4}
             readOnly
-            style={{ width: "100%", fontFamily: "inherit", fontSize: 13, opacity: 0.75 }}
+            style={{ width: "100%", fontFamily: "inherit", opacity: 0.75 }}
             value={
               sourceAgent
                 ? String(sourceAgent.config.strategy_params.prompt ?? "")
