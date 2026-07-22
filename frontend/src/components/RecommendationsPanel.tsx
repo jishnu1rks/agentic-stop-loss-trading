@@ -38,8 +38,9 @@ let recoCache: RecoCache | null = loadPersistedRecoCache();
 function fetchRecommendations(
   setAgents: (agents: Agent[]) => void,
   setRecosByAgent: (fn: (prev: Record<string, Recommendation[]>) => Record<string, Recommendation[]>) => void,
-) {
-  api.listAgents().then((all) => {
+  force = false,
+): Promise<void> {
+  return api.listAgents().then((all) => {
     const recoAgents = all.filter(
       (a) =>
         a.strategy === "momentum_breakout" ||
@@ -55,10 +56,10 @@ function fetchRecommendations(
     // "fresh" (isStale checks only fetchedAt), leaving the panel stuck on
     // "fetching recommendations..." for up to RECO_REFRESH_INTERVAL_MS on
     // the next mount even though nothing is actually in flight anymore.
-    Promise.allSettled(
+    return Promise.allSettled(
       recoAgents.map((a) =>
         api
-          .agentRecommendations(a.agent_id)
+          .agentRecommendations(a.agent_id, force)
           .then((recos) => recos.map((r) => ({ ...r, strategy: a.strategy })))
           .catch(() => [] as Recommendation[])
           .then((tagged) => {
@@ -290,6 +291,12 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
     recoCache?.recosByAgent ?? {},
   );
   const [capFilter, setCapFilter] = useState<CapFilter>("all");
+  const [forcing, setForcing] = useState(false);
+
+  const forceRescan = () => {
+    setForcing(true);
+    fetchRecommendations(setAgents, setRecosByAgent, true).finally(() => setForcing(false));
+  };
 
   useEffect(() => {
     const isStale = recoCache === null || Date.now() - recoCache.fetchedAt >= RECO_REFRESH_INTERVAL_MS;
@@ -331,6 +338,15 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
         {/* <span className="text-dim" style={{ fontSize: 12 }}>
           Live scan across each agent's configured stocks (momentum breakout and AI recommendation agents)
         </span> */}
+        <button
+          className="btn"
+          style={{ padding: "4px 12px", fontSize: 12 }}
+          disabled={forcing}
+          onClick={forceRescan}
+          title="Bypasses the 1-hour/11:00-15:00 AI scan limit for testing - runs a real scan right now"
+        >
+          {forcing ? "Rescanning…" : "Force rescan"}
+        </button>
       </div>
       {agents.length === 0 ? (
         <div className="empty-state">No recommendation agents configured yet</div>

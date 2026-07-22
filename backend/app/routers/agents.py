@@ -130,13 +130,23 @@ def agent_activity(agent_id: str, limit: int = 30, db: Session = Depends(get_db)
 
 
 @router.get("/{agent_id}/recommendations")
-def agent_recommendations(agent_id: str, top_n: int = 10, db: Session = Depends(get_db)):
+def agent_recommendations(
+    agent_id: str,
+    top_n: int = 10,
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
     """Live trade-idea cards for an agent's universe - current price,
     computed target/stop-loss, position size, and a plain rationale. Not a
     persisted signal, just a read of the agent's own criteria against
     right-now prices. Dispatches by strategy: watchlist_trigger checks a
     fixed set of hand-configured bands; momentum_breakout scans and ranks
-    the agent's whole universe (Section 5.2/5.3)."""
+    the agent's whole universe (Section 5.2/5.3).
+
+    force=True is a manual, human-initiated override for the two LLM
+    strategies only, bypassing get_or_scan_llm_signals' 1-hour/11:00-15:00
+    guard-rail for testing (see the dashboard's "Force rescan" button) -
+    ignored for the other strategies, which were never throttled."""
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
     if agent is None:
         raise HTTPException(404, "Agent not found")
@@ -147,9 +157,9 @@ def agent_recommendations(agent_id: str, top_n: int = 10, db: Session = Depends(
         if agent.strategy == "momentum_breakout":
             return build_momentum_recommendations(db, agent, top_n=top_n)
         if agent.strategy == "llm_recommendation":
-            return build_llm_recommendations(db, agent)
+            return build_llm_recommendations(db, agent, force=force)
         if agent.strategy == "llm_recommendation_execution":
-            return build_llm_execution_recommendations(db, agent)
+            return build_llm_execution_recommendations(db, agent, force=force)
     except MarketDataUnavailableError as exc:
         raise HTTPException(503, f"Market data unavailable: {exc}") from exc
 

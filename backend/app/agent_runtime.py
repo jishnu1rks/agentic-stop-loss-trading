@@ -187,6 +187,7 @@ def get_or_scan_llm_signals(
     cache_key: str,
     config: dict,
     market_data_adapter,
+    force: bool = False,
 ) -> tuple[list[str], MarketDataSnapshot, list[Signal]]:
     """Throttled front door for the llm_recommendation strategy's full
     Scan step (universe resolution + market snapshot + LLM call): at most
@@ -209,7 +210,13 @@ def get_or_scan_llm_signals(
     cache_key is always the Recommending agent's own agent_id, even when
     called on behalf of an llm_recommendation_execution agent mirroring
     its prompt/universe (see _find_recommend_only_agent) - the two share
-    one cache entry rather than each spending their own quota."""
+    one cache entry rather than each spending their own quota.
+
+    force=True bypasses both the 1-hour interval and the 11:00-15:00
+    window entirely - a manual, human-initiated override for testing (see
+    the dashboard's "Force rescan" button), never set by the scheduler or
+    a normal recommendations fetch, so it can't turn into an automated way
+    around the MVP quota guard-rail."""
     strategy_params = config.get("strategy_params", {})
     lookback_days = strategy_params.get("lookback_days", 20)
     now_utc = datetime.now(timezone.utc)
@@ -222,14 +229,14 @@ def get_or_scan_llm_signals(
         snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
         return universe, snapshot, _deserialize_signals(cached.signals_json)
 
-    if cache_usable:
+    if not force and cache_usable:
         scanned_at = cached.scanned_at
         if scanned_at.tzinfo is None:
             scanned_at = scanned_at.replace(tzinfo=timezone.utc)
         if now_utc - scanned_at < LLM_SCAN_MIN_INTERVAL:
             return _from_cache()
 
-    if not (LLM_SCAN_WINDOW_START <= now_ist.time() <= LLM_SCAN_WINDOW_END):
+    if not force and not (LLM_SCAN_WINDOW_START <= now_ist.time() <= LLM_SCAN_WINDOW_END):
         if cache_usable:
             return _from_cache()
         return [], MarketDataSnapshot(prices={}, history={}, volumes={}), []
@@ -503,7 +510,7 @@ def build_momentum_recommendations(db: Session, agent: Agent, top_n: int = 10) -
     return top
 
 
-def build_llm_recommendations(db: Session, agent: Agent) -> list[dict]:
+def build_llm_recommendations(db: Session, agent: Agent, force: bool = False) -> list[dict]:
     """Live trade-idea cards for an llm_recommendation agent (Section 5.2's
     Recommending agent): runs the same LLM call run_agent_scan would make
     against right-now prices, and turns any returned signals into cards.
@@ -517,7 +524,7 @@ def build_llm_recommendations(db: Session, agent: Agent) -> list[dict]:
     free_capital = get_capital_summary(db)["free_capital"]
     budget = free_capital * RECOMMENDATION_BUDGET_PCT_OF_FREE_CAPITAL
 
-    _universe, snapshot, signals = get_or_scan_llm_signals(db, agent.agent_id, config, market_data_adapter)
+    _universe, snapshot, signals = get_or_scan_llm_signals(db, agent.agent_id, config, market_data_adapter, force=force)
 
     recommendations = []
     for signal in signals:
@@ -582,7 +589,7 @@ def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> l
     return [s for s in signals if s.confidence * 100 >= min_confidence_pct and s.direction in allowed]
 
 
-def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]:
+def build_llm_execution_recommendations(db: Session, agent: Agent, force: bool = False) -> list[dict]:
     """Live trade-idea cards for an llm_recommendation_execution agent (an
     Execution agent that trades off the Recommending agent's own LLM
     signals instead of fixed bands/breakouts): mirrors the Recommending
@@ -600,7 +607,9 @@ def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]
     open_symbols = _open_symbols(db, agent.agent_id)
     budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
 
-    _universe, snapshot, signals = get_or_scan_llm_signals(db, source_agent.agent_id, source_config, market_data_adapter)
+    _universe, snapshot, signals = get_or_scan_llm_signals(
+        db, source_agent.agent_id, source_config, market_data_adapter, force=force
+    )
     signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
 
     recommendations = []

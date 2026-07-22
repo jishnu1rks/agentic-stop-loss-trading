@@ -66,8 +66,10 @@ export const auth = {
 export const api = {
   listAgents: () => client.get<Agent[]>("/agents").then((r) => r.data),
   agentsBreakdown: () => client.get<AgentBreakdown[]>("/dashboard/agents-breakdown").then((r) => r.data),
-  agentRecommendations: (agentId: string) =>
-    client.get<Recommendation[]>(`/agents/${agentId}/recommendations`).then((r) => r.data),
+  agentRecommendations: (agentId: string, force = false) =>
+    client
+      .get<Recommendation[]>(`/agents/${agentId}/recommendations`, { params: force ? { force: true } : undefined })
+      .then((r) => r.data),
   updateAgent: (agentId: string, payload: AgentConfigIn) =>
     client.put<Agent>(`/agents/${agentId}`, payload).then((r) => r.data),
   setAgentActive: (agentId: string, active: boolean) =>
