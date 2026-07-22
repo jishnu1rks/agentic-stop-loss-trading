@@ -130,12 +130,14 @@ export default function TradeLogTable({
 
   const stats = useMemo(() => {
     if (!showPeriodFilter) return null;
+    const grossPnl = periodFiltered.reduce((sum, t) => sum + (t.gross_profit ?? 0), 0);
     const netPnl = periodFiltered.reduce((sum, t) => sum + (t.net_profit ?? 0), 0);
     const charges = periodFiltered.reduce((sum, t) => sum + (t.charges ?? 0), 0);
     const tax = periodFiltered.reduce((sum, t) => sum + (t.tax ?? 0), 0);
     const wins = periodFiltered.filter((t) => (t.net_profit ?? 0) > 0).length;
     const winRate = periodFiltered.length ? (wins / periodFiltered.length) * 100 : 0;
-    return { count: periodFiltered.length, netPnl, charges, tax, winRate };
+    // Math check: netPnl should equal (grossPnl - charges - tax), allowing for rounding
+    return { count: periodFiltered.length, grossPnl, netPnl, charges, tax, winRate };
   }, [periodFiltered, showPeriodFilter]);
 
   const sorted = useMemo(() => {
@@ -371,8 +373,13 @@ export default function TradeLogTable({
           {stats && (
             <div className="kpi-grid" style={{ marginBottom: 14 }}>
               <div className="kpi-card">
+                <div className="label">P &amp; L</div>
+                <div className={`value ${stats.grossPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.grossPnl)}</div>
+              </div>
+              <div className="kpi-card">
                 <div className="label">Net P &amp; L</div>
                 <div className={`value ${stats.netPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.netPnl)}</div>
+                <div className="subvalue">{fmtMoney(stats.charges)} charges &amp; {fmtMoney(stats.tax)} tax</div>
               </div>
               <div className="kpi-card">
                 <div className="label">Trades</div>
@@ -381,11 +388,6 @@ export default function TradeLogTable({
               <div className="kpi-card">
                 <div className="label">Win rate</div>
                 <div className="value">{stats.winRate.toFixed(1)}%</div>
-              </div>
-              <div className="kpi-card">
-                <div className="label">Charges &amp; tax</div>
-                <div className="value">{fmtMoney(stats.charges)}</div>
-                <div className="subvalue">{fmtMoney(stats.tax)} tax accrued</div>
               </div>
             </div>
           )}

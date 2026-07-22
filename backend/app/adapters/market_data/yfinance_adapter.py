@@ -5,10 +5,18 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 
 from app.adapters.market_data.base import MarketDataAdapter, MarketDataSnapshot
+from app.fundamentals import LARGE_CAP_FLOOR, MID_CAP_FLOOR
 
 IST = ZoneInfo("Asia/Kolkata")
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
+
+# Floor for the small-cap tier of get_tiered_trending_symbols, so a
+# dayvolume-sorted "small cap" pull doesn't surface pure penny/illiquid
+# junk (classify_cap_size itself has no floor below MID_CAP_FLOOR) -
+# matches the min_market_cap already used elsewhere in this system's
+# agent configs (e.g. the Execution agent's flat screener).
+SMALL_CAP_SCREENER_FLOOR = 500 * 10_000_000
 
 
 class MarketDataUnavailableError(Exception):
@@ -108,6 +116,63 @@ class YFinanceMarketDataAdapter(MarketDataAdapter):
             if symbol and symbol.endswith(".NS"):
                 symbols.append(symbol[: -len(".NS")])
         return symbols[:limit]
+
+    def get_tiered_trending_symbols(
+        self,
+        large_count: int = 5,
+        mid_count: int = 5,
+        small_count: int = 5,
+        sort_by: Literal["dayvolume", "percentchange"] = "dayvolume",
+    ) -> list[str]:
+        """Like get_trending_symbols, but pulls a fixed count from each
+        market-cap tier instead of one flat top-N list - a dayvolume sort
+        with a single min_market_cap floor otherwise skews almost entirely
+        large-cap. Cap bands mirror app.fundamentals.classify_cap_size
+        (LARGE_CAP_FLOOR/MID_CAP_FLOOR) so a symbol's tier here matches how
+        it's labeled elsewhere (cap_size on recommendation cards). A tier
+        returning fewer than requested (or zero) doesn't block the others -
+        only an entirely empty combined result is treated as unavailable."""
+        tiers: list[tuple[int, list]] = [
+            (large_count, [yf.EquityQuery("gt", ["intradaymarketcap", LARGE_CAP_FLOOR])]),
+            (
+                mid_count,
+                [
+                    yf.EquityQuery("gt", ["intradaymarketcap", MID_CAP_FLOOR]),
+                    yf.EquityQuery("lt", ["intradaymarketcap", LARGE_CAP_FLOOR]),
+                ],
+            ),
+            (
+                small_count,
+                [
+                    yf.EquityQuery("gt", ["intradaymarketcap", SMALL_CAP_SCREENER_FLOOR]),
+                    yf.EquityQuery("lt", ["intradaymarketcap", MID_CAP_FLOOR]),
+                ],
+            ),
+        ]
+
+        symbols: list[str] = []
+        for count, cap_clauses in tiers:
+            if count <= 0:
+                continue
+            query = yf.EquityQuery("and", [yf.EquityQuery("eq", ["exchange", "NSI"]), *cap_clauses])
+            try:
+                result = yf.screen(query, count=count, sortField=sort_by, sortAsc=False)
+            except Exception as exc:
+                raise MarketDataUnavailableError(f"Screener request failed: {exc}") from exc
+            # yfinance's `count` param is only a request, not a guarantee -
+            # this version of the library returns a ~25-row page regardless
+            # of a smaller count (same reason get_trending_symbols slices
+            # with symbols[:limit] below) - so truncate per tier here too.
+            tier_symbols = []
+            for quote in result.get("quotes", []):
+                symbol = quote.get("symbol")
+                if symbol and symbol.endswith(".NS"):
+                    tier_symbols.append(symbol[: -len(".NS")])
+            symbols.extend(tier_symbols[:count])
+
+        if not symbols:
+            raise MarketDataUnavailableError("Screener returned no NSE symbols")
+        return symbols
 
     def get_fundamentals(self, symbol: str) -> dict | None:
         """Pulls the subset of yf.Ticker(...).info that's reliably populated

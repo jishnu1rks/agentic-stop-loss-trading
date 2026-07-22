@@ -44,6 +44,7 @@ export default function AgentSettingsPage({ refreshTick, onChanged }: { refreshT
                 <AgentSettingsCard
                   key={a.agent_id}
                   agent={a}
+                  allAgents={agents}
                   onSaved={() => {
                     load();
                     onChanged();

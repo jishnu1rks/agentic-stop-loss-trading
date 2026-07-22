@@ -4,14 +4,24 @@ import type { Agent, AgentRiskConfig, AgentScheduleConfig } from "../api/types";
 
 const STRATEGY_DESCRIPTIONS: Record<string, string> = {
   llm_recommendation:
-    "Sends a live snapshot of its configured stocks to an AI model along with the trading prompt below, and asks it which symbols look worth buying or selling right now.",
+    "Pulls a live universe of trending NSE stocks (5 large-cap, 5 mid-cap, 5 small-cap, each pre-screened for financial health/valuation - see eligibility criteria below), sends their current price/volume snapshot to an AI model along with the trading prompt below, and asks it which symbols look worth buying or selling right now.",
   llm_recommendation_execution:
-    "Mirrors the Recommending agent's AI-generated buy/sell signals exactly (same prompt, same stocks) - the Recommending agent only suggests, this one sizes, protects, and enters trades on those same signals using the risk settings below.",
+    "Mirrors the Recommending agent's AI-generated buy/sell signals (same prompt, same stocks), narrowed by the confidence/direction filters below - the Recommending agent only suggests, this one sizes, protects, and enters trades on the signals that pass those filters, using the risk settings below.",
   momentum_breakout:
     "Scans its configured stocks for names breaking out on strong price momentum and above-average volume, then automatically enters a trade the moment a breakout is confirmed.",
   watchlist_trigger:
     "Watches a fixed list of symbols you've configured and enters a trade only when price crosses the specific level you've set for that symbol.",
 };
+
+// The fundamentals health/valuation screen every screener-sourced universe
+// symbol must clear before an agent (or the AI) ever sees it - see backend
+// app/fundamentals.py:is_recommendable, applied in agent_runtime.filter_recommendable.
+const ELIGIBILITY_CRITERIA_NOTE =
+  "Eligibility filter: before reaching this agent (or the AI), every symbol from the live screener must clear a " +
+  "fundamentals health/valuation check - hard-disqualified outright if Debt/Equity is 3x or more, or earnings " +
+  "growth has collapsed below -50%. Otherwise it's scored on Debt/Equity, PEG, revenue/earnings growth, insider " +
+  "holding %, and P/B (whichever of these are available), and must score at least 50% to pass. A symbol with no " +
+  "fundamentals data at all is kept (treated as neutral) rather than excluded for a data gap.";
 
 function strategyDescription(strategy: string): string {
   return STRATEGY_DESCRIPTIONS[strategy] ?? "Scans its configured stocks on the schedule below and enters trades according to its configured strategy.";
@@ -33,13 +43,42 @@ const DEFAULT_RISK: AgentRiskConfig = {
   max_daily_capital: 50000,
 };
 
-export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; onSaved: () => void }) {
+// Directions an Execution agent will act on - "both" (default, matches the
+// pre-existing unconditional behavior) or restricted to one side.
+type ExecutionDirectionFilter = "both" | "buy" | "sell";
+
+export default function AgentSettingsCard({
+  agent,
+  allAgents = [],
+  onSaved,
+}: {
+  agent: Agent;
+  allAgents?: Agent[];
+  onSaved: () => void;
+}) {
   const [risk, setRisk] = useState<AgentRiskConfig>(agent.config.risk ?? DEFAULT_RISK);
   const [schedule, setSchedule] = useState<AgentScheduleConfig>(agent.config.schedule);
   const isLlmRecommendation = agent.strategy === "llm_recommendation";
+  const isExecutionAgent = agent.strategy === "llm_recommendation_execution";
   const [prompt, setPrompt] = useState(
     isLlmRecommendation ? String(agent.config.strategy_params.prompt ?? "") : ""
   );
+
+  // The Recommending agent this Execution agent mirrors (see backend's
+  // _find_recommend_only_agent) - looked up client-side from the already-
+  // fetched agent list purely for transparency (showing the user what
+  // prompt/universe this agent is actually acting on), not for saving.
+  const sourceAgent = isExecutionAgent
+    ? allAgents.find((a) => a.strategy === "llm_recommendation" && a.active && a.config.risk == null)
+    : undefined;
+
+  const [minConfidencePct, setMinConfidencePct] = useState(() =>
+    isExecutionAgent ? Number(agent.config.strategy_params.min_confidence_pct ?? 0) : 0
+  );
+  const [directionFilter, setDirectionFilter] = useState<ExecutionDirectionFilter>(() =>
+    isExecutionAgent ? ((agent.config.strategy_params.directions as ExecutionDirectionFilter) ?? "both") : "both"
+  );
+
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -73,6 +112,9 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
     if (risk.max_concurrent_positions < 1) {
       return "Max concurrent positions must be at least 1.";
     }
+    if (isExecutionAgent && (minConfidencePct < 0 || minConfidencePct > 100)) {
+      return "Minimum confidence must be between 0% and 100%.";
+    }
     return null;
   };
 
@@ -95,7 +137,9 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
         strategy: agent.strategy,
         strategy_params: isLlmRecommendation
           ? { ...agent.config.strategy_params, prompt }
-          : agent.config.strategy_params,
+          : isExecutionAgent
+            ? { ...agent.config.strategy_params, min_confidence_pct: minConfidencePct, directions: directionFilter }
+            : agent.config.strategy_params,
         risk: isLlmRecommendation ? null : risk,
         schedule: { ...schedule, market_hours_only: true },
       });
@@ -124,6 +168,19 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
 
       <div className="agent-description">{strategyDescription(agent.strategy)}</div>
 
+      {(isLlmRecommendation || isExecutionAgent) && (
+        <div className="field-hint" style={{ marginBottom: 12 }}>
+          MVP limit: AI scans run at most once per hour, only between 11:00 AM-3:00 PM, to conserve API quota. Not
+          yet user-editable - will be made configurable later.
+        </div>
+      )}
+
+      {(isLlmRecommendation || isExecutionAgent) && (
+        <div className="field-hint" style={{ marginBottom: 12 }}>
+          {ELIGIBILITY_CRITERIA_NOTE}
+        </div>
+      )}
+
       {error && <div className="error-banner">{error}</div>}
 
       {isLlmRecommendation && (
@@ -139,6 +196,54 @@ export default function AgentSettingsCard({ agent, onSaved }: { agent: Agent; on
           <span className="field-hint">
             Sent to the model on every scan alongside a live price/volume snapshot of this agent's configured stocks.
           </span>
+        </div>
+      )}
+
+      {isExecutionAgent && (
+        <div className="form-field" style={{ marginBottom: 16 }}>
+          <label>Prompt this agent is acting on</label>
+          <textarea
+            rows={4}
+            readOnly
+            style={{ width: "100%", fontFamily: "inherit", fontSize: 13, opacity: 0.75 }}
+            value={
+              sourceAgent
+                ? String(sourceAgent.config.strategy_params.prompt ?? "")
+                : "No active Recommending agent found to mirror - this agent won't produce any signals."
+            }
+          />
+          <span className="field-hint">
+            Mirrored exactly from the Recommending agent ({sourceAgent?.name ?? "none configured"}) - edit it there,
+            not here.
+          </span>
+        </div>
+      )}
+
+      {isExecutionAgent && (
+        <div className="manual-trade-form" style={{ marginBottom: 16 }}>
+          <div className="form-field">
+            <label>Minimum confidence to auto-enter</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={minConfidencePct}
+              onChange={(e) => setMinConfidencePct(Number(e.target.value))}
+            />
+            <span className="field-hint">0% = act on every mirrored signal regardless of AI confidence</span>
+          </div>
+          <div className="form-field">
+            <label>Directions to act on</label>
+            <select
+              value={directionFilter}
+              onChange={(e) => setDirectionFilter(e.target.value as ExecutionDirectionFilter)}
+            >
+              <option value="both">Buy and sell signals</option>
+              <option value="buy">Buy signals only</option>
+              <option value="sell">Sell signals only</option>
+            </select>
+          </div>
         </div>
       )}
 

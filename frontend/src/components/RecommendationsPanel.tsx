@@ -49,23 +49,26 @@ function fetchRecommendations(
     setAgents(recoAgents);
 
     const recosByAgent: Record<string, Recommendation[]> = {};
-    recoCache = { agents: recoAgents, recosByAgent, fetchedAt: Date.now() };
-    persistRecoCache(recoCache);
 
-    recoAgents.forEach((a) => {
-      api
-        .agentRecommendations(a.agent_id)
-        .then((recos) => {
-          const tagged = recos.map((r) => ({ ...r, strategy: a.strategy }));
-          recosByAgent[a.agent_id] = tagged;
-          persistRecoCache(recoCache!);
-          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: tagged }));
-        })
-        .catch(() => {
-          recosByAgent[a.agent_id] = [];
-          persistRecoCache(recoCache!);
-          setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: [] }));
-        });
+    // Persisting is deferred until every agent has settled (see below) -
+    // writing a partial cache here would tag an interrupted load as
+    // "fresh" (isStale checks only fetchedAt), leaving the panel stuck on
+    // "fetching recommendations..." for up to RECO_REFRESH_INTERVAL_MS on
+    // the next mount even though nothing is actually in flight anymore.
+    Promise.allSettled(
+      recoAgents.map((a) =>
+        api
+          .agentRecommendations(a.agent_id)
+          .then((recos) => recos.map((r) => ({ ...r, strategy: a.strategy })))
+          .catch(() => [] as Recommendation[])
+          .then((tagged) => {
+            recosByAgent[a.agent_id] = tagged;
+            setRecosByAgent((prev) => ({ ...prev, [a.agent_id]: tagged }));
+          }),
+      ),
+    ).then(() => {
+      recoCache = { agents: recoAgents, recosByAgent, fetchedAt: Date.now() };
+      persistRecoCache(recoCache);
     });
   });
 }
@@ -272,11 +275,21 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
   );
 }
 
+type CapFilter = "all" | "large" | "mid" | "small";
+
+const CAP_FILTER_OPTIONS: { value: CapFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "large", label: "Large cap" },
+  { value: "mid", label: "Mid cap" },
+  { value: "small", label: "Small cap" },
+];
+
 export default function RecommendationsPanel({ onBought }: { onBought?: () => void }) {
   const [agents, setAgents] = useState<Agent[]>(recoCache?.agents ?? []);
   const [recosByAgent, setRecosByAgent] = useState<Record<string, Recommendation[]>>(
     recoCache?.recosByAgent ?? {},
   );
+  const [capFilter, setCapFilter] = useState<CapFilter>("all");
 
   useEffect(() => {
     const isStale = recoCache === null || Date.now() - recoCache.fetchedAt >= RECO_REFRESH_INTERVAL_MS;
@@ -295,7 +308,8 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
 
   const allRecos = agents.flatMap((a) => recosByAgent[a.agent_id] ?? []);
   const loaded = agents.length > 0 && agents.every((a) => a.agent_id in recosByAgent);
-  const confirmedCount = allRecos.filter((r) => r.in_signal).length;
+  const filteredRecos = capFilter === "all" ? allRecos : allRecos.filter((r) => r.cap_size === capFilter);
+  const confirmedCount = filteredRecos.filter((r) => r.in_signal).length;
 
   return (
     <div className="panel">
@@ -313,17 +327,36 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
         <div className="empty-state">No results found.</div>
       ) : (
         <>
-          {confirmedCount === 0 && (
-            <div className="reco-rationale" style={{ marginBottom: 12, borderTop: "none", paddingTop: 0 }}>
-              No confirmed breakouts right now - showing the closest matches, ranked, none of these have actually
-              cleared the breakout threshold with volume confirmation yet.
-            </div>
-          )}
-          <div className="reco-grid">
-            {allRecos.map((reco) => (
-              <RecommendationCard key={reco.symbol} reco={reco} onBought={onBought} />
+          <div className="cap-filter-tabs" style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            {CAP_FILTER_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                className={`btn ${capFilter === opt.value ? "btn-buy" : ""}`}
+                style={{ padding: "4px 12px", fontSize: 12 }}
+                onClick={() => setCapFilter(opt.value)}
+              >
+                {opt.label}
+              </button>
             ))}
           </div>
+
+          {filteredRecos.length === 0 ? (
+            <div className="empty-state">No results for this filter.</div>
+          ) : (
+            <>
+              {confirmedCount === 0 && (
+                <div className="reco-rationale" style={{ marginBottom: 12, borderTop: "none", paddingTop: 0 }}>
+                  No confirmed breakouts right now - showing the closest matches, ranked, none of these have actually
+                  cleared the breakout threshold with volume confirmation yet.
+                </div>
+              )}
+              <div className="reco-grid">
+                {filteredRecos.map((reco) => (
+                  <RecommendationCard key={reco.symbol} reco={reco} onBought={onBought} />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>

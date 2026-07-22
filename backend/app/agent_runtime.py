@@ -4,9 +4,10 @@ Core trading flow (Section 4): Scan -> Signal -> Entry -> Protect -> Monitor
 by manual trades (Section 7.7), which go through the same Broker Adapter so
 simulation vs. live behaviour stays consistent.
 """
+import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,12 +15,13 @@ from sqlalchemy.orm import Session
 from app.adapters.broker import get_broker_adapter
 from app.adapters.broker.base import Direction
 from app.adapters.market_data import get_market_data_adapter
-from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
+from app.adapters.market_data.yfinance_adapter import IST, MarketDataUnavailableError
 from app.charges import compute_charges
 from app.config import settings
 from app.fundamentals import classify_cap_size, is_recommendable
-from app.models import Agent, AgentLog, Trade
+from app.models import Agent, AgentLog, LlmSignalCache, Trade
 from app.strategies import get_strategy
+from app.strategies.base import Signal
 from app.tax import estimate_tax
 
 
@@ -118,11 +120,20 @@ def resolve_universe(config: dict, market_data_adapter) -> list[str]:
     universe_cfg = config["universe"]
     if universe_cfg.get("type") == "screener":
         screener = universe_cfg.get("screener") or {}
-        trending = market_data_adapter.get_trending_symbols(
-            sort_by=screener.get("sort_by", "dayvolume"),
-            limit=screener.get("limit", 15),
-            min_market_cap=screener.get("min_market_cap", 5_000_000_000),
-        )
+        if config.get("strategy") == "llm_recommendation":
+            # MVP: the Recommending agent always gets a fixed 5 large/5
+            # mid/5 small-cap spread rather than one flat top-N-by-volume
+            # list, which otherwise skews almost entirely large-cap.
+            trending = market_data_adapter.get_tiered_trending_symbols(
+                large_count=5, mid_count=5, small_count=5,
+                sort_by=screener.get("sort_by", "dayvolume"),
+            )
+        else:
+            trending = market_data_adapter.get_trending_symbols(
+                sort_by=screener.get("sort_by", "dayvolume"),
+                limit=screener.get("limit", 15),
+                min_market_cap=screener.get("min_market_cap", 5_000_000_000),
+            )
         return filter_recommendable(trending, market_data_adapter)
     value = universe_cfg["value"]
     return value if isinstance(value, list) else [value]
@@ -145,6 +156,73 @@ def filter_recommendable(symbols: list[str], market_data_adapter) -> list[str]:
         if recommendable:
             kept.append(symbol)
     return kept
+
+
+# MVP hard limit (Section 9-style guard-rail) on LLM API usage: the
+# free-tier quota this system currently runs on is exhausted almost
+# instantly if every scheduler tick and every dashboard load each fire
+# their own live call - see get_or_scan_llm_signals. Not yet
+# user-configurable; surfaced as a note in the agent settings UI instead.
+LLM_SCAN_WINDOW_START = time(11, 0)
+LLM_SCAN_WINDOW_END = time(15, 0)
+LLM_SCAN_MIN_INTERVAL = timedelta(hours=1)
+
+
+def _serialize_signals(signals: list[Signal]) -> str:
+    return json.dumps(
+        [
+            {"symbol": s.symbol, "direction": s.direction, "confidence": s.confidence, "reason": s.reason}
+            for s in signals
+        ]
+    )
+
+
+def _deserialize_signals(signals_json: str) -> list[Signal]:
+    return [Signal(**item) for item in json.loads(signals_json)]
+
+
+def get_or_scan_llm_signals(
+    db: Session,
+    cache_key: str,
+    universe: list[str],
+    snapshot,
+    strategy_params: dict,
+) -> list[Signal]:
+    """Throttled front door for the llm_recommendation strategy's .scan():
+    at most one real LLM call per rolling hour, and only within an
+    11:00-15:00 IST window - every other call (scheduler tick or
+    on-demand recommendations fetch) reuses the cached result instead.
+    Outside the window, falls back to the last cached result (or an empty
+    list if none exists yet) rather than blocking entirely, so the
+    dashboard doesn't go blank outside trading hours.
+
+    cache_key is always the Recommending agent's own agent_id, even when
+    called on behalf of an llm_recommendation_execution agent mirroring
+    its prompt/universe (see _find_recommend_only_agent) - the two share
+    one cache entry rather than each spending their own quota."""
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+    cached = db.query(LlmSignalCache).filter_by(agent_id=cache_key).first()
+
+    if cached:
+        scanned_at = cached.scanned_at
+        if scanned_at.tzinfo is None:
+            scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+        if now_utc - scanned_at < LLM_SCAN_MIN_INTERVAL:
+            return _deserialize_signals(cached.signals_json)
+
+    if not (LLM_SCAN_WINDOW_START <= now_ist.time() <= LLM_SCAN_WINDOW_END):
+        return _deserialize_signals(cached.signals_json) if cached else []
+
+    signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
+
+    if cached:
+        cached.signals_json = _serialize_signals(signals)
+        cached.scanned_at = now_utc
+    else:
+        db.add(LlmSignalCache(agent_id=cache_key, signals_json=_serialize_signals(signals), scanned_at=now_utc))
+    db.commit()
+    return signals
 
 
 def _cap_size_for(symbol: str, market_data_adapter) -> str | None:
@@ -414,7 +492,7 @@ def build_llm_recommendations(db: Session, agent: Agent) -> list[dict]:
     snapshot = market_data_adapter.get_snapshot(
         universe, lookback_days=strategy_params.get("lookback_days", 20)
     )
-    signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
+    signals = get_or_scan_llm_signals(db, agent.agent_id, universe, snapshot, strategy_params)
 
     recommendations = []
     for signal in signals:
@@ -464,6 +542,21 @@ def _find_recommend_only_agent(db: Session) -> Agent | None:
     return None
 
 
+def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> list[Signal]:
+    """Execution-agent-only guard-rails on top of the mirrored Recommending
+    agent's signals (Section 5.2's Execution agent). Previously nothing on
+    the execution agent's own strategy_params was ever read - every
+    mirrored signal entered unconditionally, subject only to
+    capital/max_concurrent_positions limits. min_confidence_pct (0-100,
+    matching this system's existing %-based risk fields) and directions
+    default to "no filtering"/"both" so agents saved before this existed
+    keep today's behavior unless explicitly changed."""
+    min_confidence_pct = strategy_params.get("min_confidence_pct") or 0
+    directions = strategy_params.get("directions", "both")
+    allowed = {"buy", "sell"} if directions == "both" else {directions}
+    return [s for s in signals if s.confidence * 100 >= min_confidence_pct and s.direction in allowed]
+
+
 def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]:
     """Live trade-idea cards for an llm_recommendation_execution agent (an
     Execution agent that trades off the Recommending agent's own LLM
@@ -487,7 +580,8 @@ def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]
     snapshot = market_data_adapter.get_snapshot(
         universe, lookback_days=strategy_params.get("lookback_days", 20)
     )
-    signals = get_strategy("llm_recommendation_execution").scan(universe, snapshot, strategy_params)
+    signals = get_or_scan_llm_signals(db, source_agent.agent_id, universe, snapshot, strategy_params)
+    signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
 
     recommendations = []
     for signal in signals:
@@ -752,6 +846,7 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         return
 
     scan_config = config
+    llm_cache_key = agent.agent_id
     if agent.strategy == "llm_recommendation_execution":
         source_agent = _find_recommend_only_agent(db)
         if source_agent is None:
@@ -759,6 +854,7 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
             db.commit()
             return
         scan_config = source_agent.config
+        llm_cache_key = source_agent.agent_id
 
     try:
         universe = resolve_universe(scan_config, market_data_adapter)
@@ -771,8 +867,18 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         db.commit()
         return
 
-    strategy = get_strategy(agent.strategy)
-    signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
+    if agent.strategy in ("llm_recommendation", "llm_recommendation_execution"):
+        # Throttled: at most 1 real LLM call/hour, only 11:00-15:00 IST -
+        # see get_or_scan_llm_signals.
+        signals = get_or_scan_llm_signals(
+            db, llm_cache_key, universe, snapshot, scan_config.get("strategy_params", {})
+        )
+    else:
+        strategy = get_strategy(agent.strategy)
+        signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
+
+    if agent.strategy == "llm_recommendation_execution":
+        signals = _filter_execution_signals(signals, config.get("strategy_params", {}))
 
     signalled_symbols = {s.symbol for s in signals}
     for symbol in universe:

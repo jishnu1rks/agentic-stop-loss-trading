@@ -94,6 +94,22 @@ class Trade(Base):
     agent = relationship("Agent", back_populates="trades")
 
 
+class LlmSignalCache(Base):
+    """Throttles LLM API usage (Section 9-style guard-rail, MVP-hardcoded):
+    the llm_recommendation strategy is only actually invoked once per
+    rolling hour, within an 11:00-15:00 IST window - see
+    agent_runtime.get_or_scan_llm_signals. Keyed by the Recommending
+    agent's own agent_id so an llm_recommendation_execution agent
+    mirroring that same prompt/universe (see _find_recommend_only_agent)
+    reuses this same cache entry instead of doubling API spend."""
+
+    __tablename__ = "llm_signal_cache"
+
+    agent_id = Column(String, ForeignKey("agents.agent_id"), primary_key=True)
+    signals_json = Column(Text, nullable=False)
+    scanned_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class AgentLog(Base):
     """Section 6.4 - agent_logs table (scan decisions, including non-trades)."""
 
