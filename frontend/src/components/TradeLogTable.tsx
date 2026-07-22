@@ -7,10 +7,41 @@ import ChargesBreakdownModal from "./ChargesBreakdownModal";
 import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
+type Period = "all" | "week" | "month" | "year";
 
 function fmtDateOnly(d: string | null) {
   if (!d) return "—";
   return new Date(d).toLocaleDateString("en-IN", { dateStyle: "medium" });
+}
+
+function fmtMoney(n: number) {
+  return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
+}
+
+// Calendar-bucketed range for the period filter, mirroring the dashboard
+// KPIs' "this month" convention rather than a rolling N-day window.
+function periodRange(period: Period, now: Date): [Date, Date] | null {
+  if (period === "all") return null;
+  if (period === "week") {
+    // ISO week: Monday 00:00 through next Monday 00:00.
+    const day = (now.getDay() + 6) % 7; // 0 = Monday
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day);
+    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+    return [start, end];
+  }
+  if (period === "month") {
+    return [new Date(now.getFullYear(), now.getMonth(), 1), new Date(now.getFullYear(), now.getMonth() + 1, 1)];
+  }
+  return [new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear() + 1, 0, 1)];
+}
+
+function inPeriod(t: Trade, period: Period, now: Date): boolean {
+  const range = periodRange(period, now);
+  if (!range) return true;
+  const dateStr = t.sell_date ?? t.purchase_date;
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  return d >= range[0] && d < range[1];
 }
 
 type Column = {
@@ -25,12 +56,15 @@ type Column = {
 export default function TradeLogTable({
   onChanged,
   lockedStatus,
+  showPeriodFilter,
 }: {
   onChanged?: () => void;
   lockedStatus?: "open" | "closed";
   title?: string;
+  showPeriodFilter?: boolean;
 }) {
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [period, setPeriod] = useState<Period>("all");
   const [pnlByTradeId, setPnlByTradeId] = useState<Record<string, OpenPositionPnl>>({});
   const [agentNameById, setAgentNameById] = useState<Record<string, string>>({});
   const [statusFilter] = useState(lockedStatus ?? "");
@@ -88,8 +122,26 @@ export default function TradeLogTable({
     return () => clearInterval(id);
   }, [statusFilter]);
 
+  const periodFiltered = useMemo(() => {
+    if (!showPeriodFilter) return trades;
+    const now = new Date();
+    return trades.filter((t) => inPeriod(t, period, now));
+  }, [trades, period, showPeriodFilter]);
+
+  const stats = useMemo(() => {
+    if (!showPeriodFilter) return null;
+    const grossPnl = periodFiltered.reduce((sum, t) => sum + (t.gross_profit ?? 0), 0);
+    const netPnl = periodFiltered.reduce((sum, t) => sum + (t.net_profit ?? 0), 0);
+    const charges = periodFiltered.reduce((sum, t) => sum + (t.charges ?? 0), 0);
+    const tax = periodFiltered.reduce((sum, t) => sum + (t.tax ?? 0), 0);
+    const wins = periodFiltered.filter((t) => (t.net_profit ?? 0) > 0).length;
+    const winRate = periodFiltered.length ? (wins / periodFiltered.length) * 100 : 0;
+    // Math check: netPnl should equal (grossPnl - charges - tax), allowing for rounding
+    return { count: periodFiltered.length, grossPnl, netPnl, charges, tax, winRate };
+  }, [periodFiltered, showPeriodFilter]);
+
   const sorted = useMemo(() => {
-    const copy = [...trades];
+    const copy = [...periodFiltered];
     copy.sort((a, b) => {
       const av = a[sortKey];
       const bv = b[sortKey];
@@ -101,7 +153,7 @@ export default function TradeLogTable({
       return 0;
     });
     return copy;
-  }, [trades, sortKey, sortDir]);
+  }, [periodFiltered, sortKey, sortDir]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -233,7 +285,14 @@ export default function TradeLogTable({
       id: "profit_loss",
       label: "Profit/Loss",
       sortKey: "gross_profit",
-      cell: (t) => (t.gross_profit != null ? `${t.gross_profit.toFixed(2)}` : "—"),
+      cell: (t) =>
+        t.gross_profit != null ? (
+          <button className="editable-cell" title="Click to view all trade details" onClick={() => setDetailsTrade(t)}>
+            {t.gross_profit.toFixed(2)}
+          </button>
+        ) : (
+          "—"
+        ),
       cellClassName: (t) => (t.gross_profit != null ? (t.gross_profit >= 0 ? "text-green" : "text-red") : ""),
     },
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
@@ -300,6 +359,41 @@ export default function TradeLogTable({
       ];
 
   return (
+    <>
+      {showPeriodFilter && (
+        <>
+          <div className="period-filter">
+            {(["all", "week", "month", "year"] as Period[]).map((p) => (
+              <button key={p} className={p === period ? "active" : ""} onClick={() => setPeriod(p)}>
+                {p === "all" ? "All time" : `This ${p}`}
+              </button>
+            ))}
+          </div>
+
+          {stats && (
+            <div className="kpi-grid" style={{ marginBottom: 14 }}>
+              <div className="kpi-card">
+                <div className="label">P &amp; L</div>
+                <div className={`value ${stats.grossPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.grossPnl)}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="label">Net P &amp; L</div>
+                <div className={`value ${stats.netPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.netPnl)}</div>
+                <div className="subvalue">{fmtMoney(stats.charges)} charges &amp; {fmtMoney(stats.tax)} tax</div>
+              </div>
+              <div className="kpi-card">
+                <div className="label">Trades</div>
+                <div className="value">{stats.count}</div>
+              </div>
+              <div className="kpi-card">
+                <div className="label">Win rate</div>
+                <div className="value">{stats.winRate.toFixed(1)}%</div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
     <div className="panel">
       {sorted.length === 0 ? (
         <div className="empty-state">{isOpenView ? "No open trades yet" : "No trades match these filters"}</div>
@@ -382,5 +476,6 @@ export default function TradeLogTable({
         />
       )}
     </div>
+    </>
   );
 }

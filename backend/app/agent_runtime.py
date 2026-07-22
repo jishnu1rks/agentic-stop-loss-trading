@@ -4,9 +4,10 @@ Core trading flow (Section 4): Scan -> Signal -> Entry -> Protect -> Monitor
 by manual trades (Section 7.7), which go through the same Broker Adapter so
 simulation vs. live behaviour stays consistent.
 """
+import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,11 +15,13 @@ from sqlalchemy.orm import Session
 from app.adapters.broker import get_broker_adapter
 from app.adapters.broker.base import Direction
 from app.adapters.market_data import get_market_data_adapter
-from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
+from app.adapters.market_data.yfinance_adapter import IST, MarketDataUnavailableError
 from app.charges import compute_charges
 from app.config import settings
-from app.models import Agent, AgentLog, Trade
+from app.fundamentals import classify_cap_size, is_recommendable
+from app.models import Agent, AgentLog, LlmSignalCache, Trade
 from app.strategies import get_strategy
+from app.strategies.base import Signal
 from app.tax import estimate_tax
 
 
@@ -45,13 +48,37 @@ def exit_direction(entry_direction: Direction) -> Direction:
     return "sell" if entry_direction == "buy" else "buy"
 
 
-def position_size(risk: dict, price: float) -> int:
-    if risk["position_size_type"] == "fixed_amount":
-        return max(int(risk["position_size_value"] // price), 0)
-    if risk["position_size_type"] == "pct_capital":
-        budget = risk["max_daily_capital"] * (risk["position_size_value"] / 100)
-        return max(int(budget // price), 0)
-    raise ValueError(f"Unknown position_size_type: {risk['position_size_type']}")
+def position_size(budget: float, price: float) -> int:
+    """No fixed per-trade amount to configure - a signal spends whatever
+    capital is actually available for it, capped by the caller-supplied
+    budget (typically min(account-wide free capital, this agent's
+    remaining max_daily_capital allowance) - see trade_budget)."""
+    if price <= 0:
+        return 0
+    return max(int(budget // price), 0)
+
+
+# Hard per-trade ceiling (Section 9-style guard-rail): no single trade may
+# commit more than this fraction of an agent's max_daily_capital, even if
+# free capital and the day's remaining allowance would allow more - keeps
+# one signal from swallowing a whole day's budget in a single trade.
+MAX_TRADE_PCT_OF_DAILY_CAPITAL = 0.25
+
+
+def trade_budget(risk: dict, free_capital: float, capital_used_today: float) -> float:
+    remaining_daily_allowance = max(risk["max_daily_capital"] - capital_used_today, 0)
+    max_per_trade = risk["max_daily_capital"] * MAX_TRADE_PCT_OF_DAILY_CAPITAL
+    return min(free_capital, remaining_daily_allowance, max_per_trade)
+
+
+# llm_recommendation agents (Section 5.2's Recommending agent) carry no risk
+# config of their own - they never size or place a trade. The target/stop-loss/
+# qty shown on their idea cards are illustrative only (same guard-rail
+# percentages this system uses elsewhere), so a viewer has a concrete sense of
+# scale; a human still decides real sizing and risk before acting on an idea.
+RECOMMENDATION_STOP_LOSS_PCT = 1.5
+RECOMMENDATION_TARGET_PCT = 3.0
+RECOMMENDATION_BUDGET_PCT_OF_FREE_CAPITAL = 0.25
 
 
 def _open_position_count(db: Session, agent_id: str) -> int:
@@ -80,6 +107,129 @@ def _open_symbols(db: Session, agent_id: str) -> set[str]:
         .all()
     )
     return {r.stock_symbol for r in rows}
+
+
+def resolve_universe(config: dict, market_data_adapter) -> list[str]:
+    """Resolve an agent's configured universe into a concrete symbol list.
+    "watchlist"/"index" are just a stored list; "screener" (Section 5.1)
+    instead defers to the market data adapter's live top-N discovery, so the
+    universe is today's most-active/biggest-movers rather than a
+    hand-maintained list. May raise MarketDataUnavailableError - callers
+    already treat that as a fail-safe pause for get_snapshot, so it's raised
+    here rather than swallowed."""
+    universe_cfg = config["universe"]
+    if universe_cfg.get("type") == "screener":
+        screener = universe_cfg.get("screener") or {}
+        if config.get("strategy") == "llm_recommendation":
+            # MVP: the Recommending agent always gets a fixed 5 large/5
+            # mid/5 small-cap spread rather than one flat top-N-by-volume
+            # list, which otherwise skews almost entirely large-cap.
+            trending = market_data_adapter.get_tiered_trending_symbols(
+                large_count=5, mid_count=5, small_count=5,
+                sort_by=screener.get("sort_by", "dayvolume"),
+            )
+        else:
+            trending = market_data_adapter.get_trending_symbols(
+                sort_by=screener.get("sort_by", "dayvolume"),
+                limit=screener.get("limit", 15),
+                min_market_cap=screener.get("min_market_cap", 5_000_000_000),
+            )
+        return filter_recommendable(trending, market_data_adapter)
+    value = universe_cfg["value"]
+    return value if isinstance(value, list) else [value]
+
+
+def filter_recommendable(symbols: list[str], market_data_adapter) -> list[str]:
+    """Standard fundamentals bar for a "screener" universe (Section 5.1) -
+    a trending symbol only enters the pool an agent actually scans if it
+    clears app.fundamentals.is_recommendable's financial-health/valuation
+    screen. A symbol whose fundamentals can't be fetched at all is kept
+    rather than dropped, since a data-source hiccup on one name shouldn't
+    silently shrink the universe for every agent using it."""
+    kept = []
+    for symbol in symbols:
+        fundamentals = market_data_adapter.get_fundamentals(symbol)
+        if fundamentals is None:
+            kept.append(symbol)
+            continue
+        recommendable, _, _ = is_recommendable(fundamentals)
+        if recommendable:
+            kept.append(symbol)
+    return kept
+
+
+# MVP hard limit (Section 9-style guard-rail) on LLM API usage: the
+# free-tier quota this system currently runs on is exhausted almost
+# instantly if every scheduler tick and every dashboard load each fire
+# their own live call - see get_or_scan_llm_signals. Not yet
+# user-configurable; surfaced as a note in the agent settings UI instead.
+LLM_SCAN_WINDOW_START = time(11, 0)
+LLM_SCAN_WINDOW_END = time(15, 0)
+LLM_SCAN_MIN_INTERVAL = timedelta(hours=1)
+
+
+def _serialize_signals(signals: list[Signal]) -> str:
+    return json.dumps(
+        [
+            {"symbol": s.symbol, "direction": s.direction, "confidence": s.confidence, "reason": s.reason}
+            for s in signals
+        ]
+    )
+
+
+def _deserialize_signals(signals_json: str) -> list[Signal]:
+    return [Signal(**item) for item in json.loads(signals_json)]
+
+
+def get_or_scan_llm_signals(
+    db: Session,
+    cache_key: str,
+    universe: list[str],
+    snapshot,
+    strategy_params: dict,
+) -> list[Signal]:
+    """Throttled front door for the llm_recommendation strategy's .scan():
+    at most one real LLM call per rolling hour, and only within an
+    11:00-15:00 IST window - every other call (scheduler tick or
+    on-demand recommendations fetch) reuses the cached result instead.
+    Outside the window, falls back to the last cached result (or an empty
+    list if none exists yet) rather than blocking entirely, so the
+    dashboard doesn't go blank outside trading hours.
+
+    cache_key is always the Recommending agent's own agent_id, even when
+    called on behalf of an llm_recommendation_execution agent mirroring
+    its prompt/universe (see _find_recommend_only_agent) - the two share
+    one cache entry rather than each spending their own quota."""
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+    cached = db.query(LlmSignalCache).filter_by(agent_id=cache_key).first()
+
+    if cached:
+        scanned_at = cached.scanned_at
+        if scanned_at.tzinfo is None:
+            scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+        if now_utc - scanned_at < LLM_SCAN_MIN_INTERVAL:
+            return _deserialize_signals(cached.signals_json)
+
+    if not (LLM_SCAN_WINDOW_START <= now_ist.time() <= LLM_SCAN_WINDOW_END):
+        return _deserialize_signals(cached.signals_json) if cached else []
+
+    signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
+
+    if cached:
+        cached.signals_json = _serialize_signals(signals)
+        cached.scanned_at = now_utc
+    else:
+        db.add(LlmSignalCache(agent_id=cache_key, signals_json=_serialize_signals(signals), scanned_at=now_utc))
+    db.commit()
+    return signals
+
+
+def _cap_size_for(symbol: str, market_data_adapter) -> str | None:
+    fundamentals = market_data_adapter.get_fundamentals(symbol)
+    if fundamentals is None:
+        return None
+    return classify_cap_size(fundamentals.get("market_cap"))
 
 
 def get_capital_summary(db: Session) -> dict:
@@ -183,6 +333,7 @@ def build_watchlist_recommendations(db: Session, agent: Agent) -> list[dict]:
     bands = config.get("strategy_params", {}).get("bands", {})
     risk = config["risk"]
     open_symbols = _open_symbols(db, agent.agent_id)
+    budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
 
     recommendations = []
     for symbol, band in bands.items():
@@ -227,11 +378,12 @@ def build_watchlist_recommendations(db: Session, agent: Agent) -> list[dict]:
                 "stop_loss_price": sl_price,
                 "target_price": tp_price,
                 "upside_pct": upside_pct,
-                "quantity": position_size(risk, cmp),
+                "quantity": position_size(budget, cmp),
                 "in_band": in_band,
                 "proximity_pct": _band_proximity_pct(cmp, low, high),
                 "already_open": symbol in open_symbols,
                 "rationale": rationale,
+                "cap_size": _cap_size_for(symbol, market_data_adapter),
             }
         )
     return recommendations
@@ -247,14 +399,14 @@ def build_momentum_recommendations(db: Session, agent: Agent, top_n: int = 10) -
     as such, rather than padding out to N with fabricated buy calls."""
     market_data_adapter = get_market_data_adapter()
     config = agent.config
-    universe_cfg = config["universe"]
-    universe = universe_cfg["value"] if isinstance(universe_cfg["value"], list) else [universe_cfg["value"]]
+    universe = resolve_universe(config, market_data_adapter)
     strategy_params = config.get("strategy_params", {})
     lookback_days = strategy_params.get("lookback_days", 20)
     breakout_threshold_pct = strategy_params.get("breakout_threshold_pct", 2.0)
     volume_multiplier = strategy_params.get("volume_confirmation_multiplier", 1.0)
     risk = config["risk"]
     open_symbols = _open_symbols(db, agent.agent_id)
+    budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
 
     snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
 
@@ -304,7 +456,7 @@ def build_momentum_recommendations(db: Session, agent: Agent, top_n: int = 10) -
                 "stop_loss_price": sl_price,
                 "target_price": tp_price,
                 "upside_pct": upside_pct,
-                "quantity": position_size(risk, price),
+                "quantity": position_size(budget, price),
                 "in_signal": in_signal,
                 "proximity_pct": round(min(100.0, max(0.0, breakout_pct / breakout_threshold_pct * 100)), 1),
                 "already_open": symbol in open_symbols,
@@ -313,7 +465,163 @@ def build_momentum_recommendations(db: Session, agent: Agent, top_n: int = 10) -
         )
 
     candidates.sort(key=lambda c: c["breakout_pct"], reverse=True)
-    return candidates[:top_n]
+    top = candidates[:top_n]
+    # Fundamentals lookups are per-symbol network calls, so only pay for them
+    # on the candidates actually being returned, not the whole scanned universe.
+    for candidate in top:
+        candidate["cap_size"] = _cap_size_for(candidate["symbol"], market_data_adapter)
+    return top
+
+
+def build_llm_recommendations(db: Session, agent: Agent) -> list[dict]:
+    """Live trade-idea cards for an llm_recommendation agent (Section 5.2's
+    Recommending agent): runs the same LLM call run_agent_scan would make
+    against right-now prices, and turns any returned signals into cards.
+    This strategy never sizes or places a trade itself (that's the Execution
+    agent's job) and carries no risk config, so target/stop-loss/qty here are
+    illustrative (RECOMMENDATION_* defaults), not agent-configured - a human
+    decides real sizing and risk if they act on one."""
+    market_data_adapter = get_market_data_adapter()
+    config = agent.config
+    universe = resolve_universe(config, market_data_adapter)
+    strategy_params = config.get("strategy_params", {})
+    open_symbols = _open_symbols(db, agent.agent_id)
+    free_capital = get_capital_summary(db)["free_capital"]
+    budget = free_capital * RECOMMENDATION_BUDGET_PCT_OF_FREE_CAPITAL
+
+    snapshot = market_data_adapter.get_snapshot(
+        universe, lookback_days=strategy_params.get("lookback_days", 20)
+    )
+    signals = get_or_scan_llm_signals(db, agent.agent_id, universe, snapshot, strategy_params)
+
+    recommendations = []
+    for signal in signals:
+        price = snapshot.prices.get(signal.symbol)
+        if price is None:
+            continue
+
+        history = snapshot.history.get(signal.symbol)
+        prior_high = round(max(history[:-1]), 2) if history and len(history) >= 2 else None
+
+        sl_price = stop_loss_price(signal.direction, price, RECOMMENDATION_STOP_LOSS_PCT)
+        tp_price = target_price(signal.direction, price, RECOMMENDATION_TARGET_PCT)
+        upside_pct = round(
+            (tp_price - price) / price * 100 if signal.direction == "buy" else (price - tp_price) / price * 100, 2
+        )
+
+        recommendations.append(
+            {
+                "symbol": signal.symbol,
+                "unavailable": False,
+                "direction": signal.direction,
+                "cmp": price,
+                "prior_high": prior_high,
+                "stop_loss_price": sl_price,
+                "target_price": tp_price,
+                "upside_pct": upside_pct,
+                "quantity": position_size(budget, price),
+                "in_signal": True,
+                "proximity_pct": round(min(100.0, max(0.0, signal.confidence * 100)), 1),
+                "already_open": signal.symbol in open_symbols,
+                "rationale": signal.reason,
+                "cap_size": _cap_size_for(signal.symbol, market_data_adapter),
+            }
+        )
+    return recommendations
+
+
+def _find_recommend_only_agent(db: Session) -> Agent | None:
+    """The Recommending agent (Section 5.2) that llm_recommendation_execution
+    agents mirror the prompt/universe of - identified as the active
+    llm_recommendation-strategy agent with no risk config, i.e. the one that
+    only ever produces ideas, never trades itself."""
+    candidates = db.query(Agent).filter(Agent.strategy == "llm_recommendation", Agent.active == True).all()  # noqa: E712
+    for candidate in candidates:
+        if candidate.config.get("risk") is None:
+            return candidate
+    return None
+
+
+def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> list[Signal]:
+    """Execution-agent-only guard-rails on top of the mirrored Recommending
+    agent's signals (Section 5.2's Execution agent). Previously nothing on
+    the execution agent's own strategy_params was ever read - every
+    mirrored signal entered unconditionally, subject only to
+    capital/max_concurrent_positions limits. min_confidence_pct (0-100,
+    matching this system's existing %-based risk fields) and directions
+    default to "no filtering"/"both" so agents saved before this existed
+    keep today's behavior unless explicitly changed."""
+    min_confidence_pct = strategy_params.get("min_confidence_pct") or 0
+    directions = strategy_params.get("directions", "both")
+    allowed = {"buy", "sell"} if directions == "both" else {directions}
+    return [s for s in signals if s.confidence * 100 >= min_confidence_pct and s.direction in allowed]
+
+
+def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]:
+    """Live trade-idea cards for an llm_recommendation_execution agent (an
+    Execution agent that trades off the Recommending agent's own LLM
+    signals instead of fixed bands/breakouts): mirrors the Recommending
+    agent's prompt/universe exactly (see _find_recommend_only_agent), but
+    prices target/stop-loss/qty from THIS agent's own risk config, since
+    it's the one that actually enters trades on these signals (see
+    run_agent_scan)."""
+    market_data_adapter = get_market_data_adapter()
+    source_agent = _find_recommend_only_agent(db)
+    if source_agent is None:
+        return []
+
+    source_config = source_agent.config
+    universe = resolve_universe(source_config, market_data_adapter)
+    strategy_params = source_config.get("strategy_params", {})
+    risk = agent.config["risk"]
+    open_symbols = _open_symbols(db, agent.agent_id)
+    budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
+
+    snapshot = market_data_adapter.get_snapshot(
+        universe, lookback_days=strategy_params.get("lookback_days", 20)
+    )
+    signals = get_or_scan_llm_signals(db, source_agent.agent_id, universe, snapshot, strategy_params)
+    signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
+
+    recommendations = []
+    for signal in signals:
+        price = snapshot.prices.get(signal.symbol)
+        if price is None:
+            continue
+
+        history = snapshot.history.get(signal.symbol)
+        prior_high = round(max(history[:-1]), 2) if history and len(history) >= 2 else None
+        breakout_pct = round((price - prior_high) / prior_high * 100, 2) if prior_high else None
+
+        sl_pct = risk["buy_stop_loss_pct"] if signal.direction == "buy" else risk["sell_stop_loss_pct"]
+        sl_price = stop_loss_price(signal.direction, price, sl_pct)
+        tp_price = target_price(signal.direction, price, risk["target_pct"]) if risk.get("target_pct") else None
+        upside_pct = None
+        if tp_price is not None:
+            upside_pct = round(
+                (tp_price - price) / price * 100 if signal.direction == "buy" else (price - tp_price) / price * 100, 2
+            )
+
+        recommendations.append(
+            {
+                "symbol": signal.symbol,
+                "unavailable": False,
+                "direction": signal.direction,
+                "cmp": price,
+                "prior_high": prior_high,
+                "breakout_pct": breakout_pct,
+                "stop_loss_price": sl_price,
+                "target_price": tp_price,
+                "upside_pct": upside_pct,
+                "quantity": position_size(budget, price),
+                "in_signal": True,
+                "proximity_pct": round(min(100.0, max(0.0, signal.confidence * 100)), 1),
+                "already_open": signal.symbol in open_symbols,
+                "rationale": signal.reason,
+                "cap_size": _cap_size_for(signal.symbol, market_data_adapter),
+            }
+        )
+    return recommendations
 
 
 def enter_position(
@@ -486,47 +794,45 @@ def modify_protection(
     return trade
 
 
-def reconcile_open_gtts(db: Session) -> int:
-    """Startup safety net for a Phase 1 quirk: SimulatorBrokerAdapter's GTT
-    store is in-process memory only (see adapters/broker/simulator.py),
-    while trades persist in the database. Any process restart (dev
-    --reload picking up a save, a crash, a redeploy) wipes every
-    previously-armed GTT, leaving already-open trades stuck open forever -
-    even once price clears their stop-loss/target - because
-    monitor_open_positions() can only fire GTTs the broker currently knows
-    about. Re-arming every open trade's brackets here on every startup
-    fixes that; place_gtt is idempotent on client_order_id, so for trades
-    the broker already has this is a no-op. Returns the number of trades
-    reconciled."""
-    broker = get_broker_adapter()
-    open_trades = db.query(Trade).filter(Trade.status == "open").all()
-    for trade in open_trades:
-        exit_dir = exit_direction(trade.direction)
-        if trade.stop_loss_gtt_id and trade.stop_loss_price:
-            broker.place_gtt(
-                client_order_id=trade.stop_loss_gtt_id,
-                symbol=trade.stock_symbol,
-                direction=exit_dir,
-                trigger_price=trade.stop_loss_price,
-                comparator="lte" if trade.direction == "buy" else "gte",
-                quantity=trade.quantity,
-                kind="stop_loss",
-            )
-        if trade.target_gtt_id and trade.target_price is not None:
-            broker.place_gtt(
-                client_order_id=trade.target_gtt_id,
-                symbol=trade.stock_symbol,
-                direction=exit_dir,
-                trigger_price=trade.target_price,
-                comparator="gte" if trade.direction == "buy" else "lte",
-                quantity=trade.quantity,
-                kind="target",
-            )
-    return len(open_trades)
+def estimate_trade_charges(trade: Trade, reference_price: float) -> dict:
+    """Itemized charge + tax breakdown for the Net P&L breakup popup. For a
+    closed trade, reference_price is the actual sell_price, so this
+    reconstructs the same numbers already stored on trade.charges/trade.tax
+    (those only store the totals, not the line items). For an open trade,
+    reference_price is the latest quote - an estimate of what closing right
+    now would cost, not yet finalized (finalization happens in close_trade)."""
+    breakdown = compute_charges(trade.direction, trade.buy_price, reference_price, trade.quantity)
+    gross = (reference_price - trade.buy_price) * trade.quantity
+    if trade.direction == "sell":
+        gross = -gross  # short: profit when price falls
+    tax = estimate_tax(gross, breakdown.total)
+
+    return {
+        "brokerage": breakdown.brokerage,
+        "stt": breakdown.stt,
+        "exchange_txn": breakdown.exchange_txn,
+        "sebi_charges": breakdown.sebi_charges,
+        "stamp_duty": breakdown.stamp_duty,
+        "gst": breakdown.gst,
+        "total_charges": breakdown.total,
+        "tax": tax,
+        "gross_profit": round(gross, 2),
+        "net_profit": round(gross - breakdown.total - tax, 2),
+        "reference_price": round(reference_price, 2),
+        "is_estimate": trade.status == "open",
+    }
 
 
 def run_agent_scan(db: Session, agent: Agent) -> None:
-    """Scan -> Signal -> Entry -> Protect -> Log for one agent (Section 4)."""
+    """Scan -> Signal -> Entry -> Protect -> Log for one agent (Section 4).
+    Recommend-only strategies (llm_recommendation - Section 5.2's
+    Recommending agent) stop after Signal: they carry no risk config to size
+    or protect a position with, by design - placing trades is the Execution
+    agent's job, not theirs. An llm_recommendation_execution agent (the
+    Execution agent) does that job: it mirrors the Recommending agent's own
+    universe/prompt exactly rather than scanning its own (see
+    _find_recommend_only_agent), then sizes/enters trades on those same
+    signals using its own risk config below, same as any other strategy."""
     if not agent.active:
         return
 
@@ -539,16 +845,53 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         db.commit()
         return
 
-    universe_cfg = config["universe"]
-    universe = universe_cfg["value"] if isinstance(universe_cfg["value"], list) else [universe_cfg["value"]]
+    scan_config = config
+    llm_cache_key = agent.agent_id
+    if agent.strategy == "llm_recommendation_execution":
+        source_agent = _find_recommend_only_agent(db)
+        if source_agent is None:
+            _log(db, agent.agent_id, None, "paused", "no Recommending agent configured to mirror")
+            db.commit()
+            return
+        scan_config = source_agent.config
+        llm_cache_key = source_agent.agent_id
 
     try:
+        universe = resolve_universe(scan_config, market_data_adapter)
         snapshot = market_data_adapter.get_snapshot(
-            universe, lookback_days=config.get("strategy_params", {}).get("lookback_days", 20)
+            universe, lookback_days=scan_config.get("strategy_params", {}).get("lookback_days", 20)
         )
     except MarketDataUnavailableError as exc:
         # Section 9 fail-safe: pause rather than act on stale/missing data.
         _log(db, agent.agent_id, None, "paused", f"market data unavailable: {exc}")
+        db.commit()
+        return
+
+    if agent.strategy in ("llm_recommendation", "llm_recommendation_execution"):
+        # Throttled: at most 1 real LLM call/hour, only 11:00-15:00 IST -
+        # see get_or_scan_llm_signals.
+        signals = get_or_scan_llm_signals(
+            db, llm_cache_key, universe, snapshot, scan_config.get("strategy_params", {})
+        )
+    else:
+        strategy = get_strategy(agent.strategy)
+        signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
+
+    if agent.strategy == "llm_recommendation_execution":
+        signals = _filter_execution_signals(signals, config.get("strategy_params", {}))
+
+    signalled_symbols = {s.symbol for s in signals}
+    for symbol in universe:
+        if symbol not in signalled_symbols:
+            _log(db, agent.agent_id, symbol, "no_signal", "no entry criteria met")
+
+    if agent.strategy == "llm_recommendation":
+        # Recommend-only: log what the model flagged for visibility, but
+        # never size or enter a position - see build_llm_recommendations for
+        # the live, on-demand version of this same scan that the
+        # Recommendations view actually reads from.
+        for signal in signals:
+            _log(db, agent.agent_id, signal.symbol, "recommended", signal.reason)
         db.commit()
         return
 
@@ -557,14 +900,6 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     open_count = _open_position_count(db, agent.agent_id)
     capital_used = _capital_committed_today(db, agent.agent_id)
     free_capital = get_capital_summary(db)["free_capital"]
-
-    strategy = get_strategy(agent.strategy)
-    signals = strategy.scan(universe, snapshot, config.get("strategy_params", {}))
-
-    signalled_symbols = {s.symbol for s in signals}
-    for symbol in universe:
-        if symbol not in signalled_symbols:
-            _log(db, agent.agent_id, symbol, "no_signal", "no entry criteria met")
 
     for signal in signals:
         if signal.symbol in open_symbols:
@@ -575,22 +910,18 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
             continue
 
         price = snapshot.prices[signal.symbol]
-        qty = position_size(risk, price)
+        # No fixed per-trade amount to configure - each signal spends
+        # whatever's left of this agent's max_daily_capital allowance,
+        # capped by the account-wide free capital pool shared across every
+        # agent and manual trade (Section 9-style hard constraint: an agent
+        # can't spend money the account doesn't actually have).
+        budget = trade_budget(risk, free_capital, capital_used)
+        qty = position_size(budget, price)
         if qty <= 0:
-            _log(db, agent.agent_id, signal.symbol, "skipped", "position size rounds to 0 shares")
+            _log(db, agent.agent_id, signal.symbol, "skipped", "insufficient capital for even 1 share")
             continue
 
         trade_value = qty * price
-        if capital_used + trade_value > risk["max_daily_capital"]:
-            _log(db, agent.agent_id, signal.symbol, "skipped", "max_daily_capital reached")
-            continue
-        if trade_value > free_capital:
-            # Section 9-style hard constraint: the account-wide capital pool
-            # (shared across all agents + manual trades) takes priority over
-            # this agent's own max_daily_capital allowance - an agent can't
-            # spend money the account doesn't actually have.
-            _log(db, agent.agent_id, signal.symbol, "skipped", "insufficient free capital")
-            continue
 
         enter_position(
             db,
@@ -667,8 +998,15 @@ def close_trade_manually(db: Session, trade: Trade, current_price: float) -> Non
 def monitor_open_positions(db: Session) -> None:
     """Monitor -> Exit -> Log for every open trade, across all agents and
     manual trades (Section 4 step 5-7). Runs on its own scheduler cadence,
-    independent of each agent's scan interval."""
-    broker = get_broker_adapter()
+    independent of each agent's scan interval.
+
+    Exit triggers are evaluated directly against each Trade's persisted
+    stop_loss_price/target_price rather than the broker's in-memory GTT
+    bookkeeping: the simulator's GttOrder objects live only in process
+    memory and don't survive a restart, so a trade opened in a prior
+    process lifetime would otherwise never be checked again no matter how
+    far price moved past its levels.
+    """
     market_data_adapter = get_market_data_adapter()
 
     open_trades = db.query(Trade).filter(Trade.status == "open").all()
@@ -681,25 +1019,35 @@ def monitor_open_positions(db: Session) -> None:
     except MarketDataUnavailableError:
         return  # fail-safe: skip this monitor cycle rather than act on nothing
 
-    fills = broker.check_and_fill_gtts(snapshot.prices)
-
-    by_gtt_id = {}
-    for trade in open_trades:
-        if trade.stop_loss_gtt_id:
-            by_gtt_id[trade.stop_loss_gtt_id] = (trade, "stop_loss")
-        if trade.target_gtt_id:
-            by_gtt_id[trade.target_gtt_id] = (trade, "target")
-
     closed_trade_ids = set()
-    for fill in fills:
-        match = by_gtt_id.get(fill.source_gtt_id)
-        if match is None:
+    for trade in open_trades:
+        price = snapshot.prices.get(trade.stock_symbol)
+        if price is None:
             continue
-        trade, reason = match
-        close_trade(db, trade, fill.price, fill.timestamp, reason)
-        _log(db, trade.agent_id, trade.stock_symbol, "exited", f"{reason} triggered at {fill.price}")
-        db.commit()
-        closed_trade_ids.add(trade.trade_id)
+
+        exit_reason = None
+        if trade.stop_loss_price:
+            hit = (
+                price <= trade.stop_loss_price
+                if trade.direction == "buy"
+                else price >= trade.stop_loss_price
+            )
+            if hit:
+                exit_reason = "stop_loss"
+        if exit_reason is None and trade.target_price:
+            hit = (
+                price >= trade.target_price
+                if trade.direction == "buy"
+                else price <= trade.target_price
+            )
+            if hit:
+                exit_reason = "target"
+
+        if exit_reason is not None:
+            force_close(db, trade, price, exit_reason)
+            _log(db, trade.agent_id, trade.stock_symbol, "exited", f"{exit_reason} triggered at {price}")
+            db.commit()
+            closed_trade_ids.add(trade.trade_id)
 
     # Time-based exit rule (Section 4 "Monitor... or a time-based exit rule
     # fires"), opt-in per agent via risk.max_hold_hours.

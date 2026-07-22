@@ -37,8 +37,6 @@ export interface AgentRiskConfig {
   buy_stop_loss_pct: number;
   sell_stop_loss_pct: number;
   target_pct?: number | null;
-  position_size_type: "fixed_amount" | "pct_capital";
-  position_size_value: number;
   max_concurrent_positions: number;
   max_daily_capital: number;
 }
@@ -49,9 +47,16 @@ export interface AgentScheduleConfig {
   market_hours_only: boolean;
 }
 
+export interface ScreenerUniverseConfig {
+  sort_by: "dayvolume" | "percentchange";
+  limit: number;
+  min_market_cap: number;
+}
+
 export interface AgentUniverseConfig {
-  type: "watchlist" | "index";
-  value: string[] | string;
+  type: "watchlist" | "index" | "screener";
+  value?: string[] | string | null;
+  screener?: ScreenerUniverseConfig | null;
 }
 
 export interface AgentConfig {
@@ -61,7 +66,9 @@ export interface AgentConfig {
   universe: AgentUniverseConfig;
   strategy: string;
   strategy_params: Record<string, unknown>;
-  risk: AgentRiskConfig;
+  // Recommend-only agents (llm_recommendation) carry no risk config - they
+  // never size or place a trade themselves.
+  risk: AgentRiskConfig | null;
   schedule: AgentScheduleConfig;
 }
 
@@ -109,6 +116,10 @@ export interface Recommendation {
   reason?: string;
   direction?: Direction;
   cmp?: number;
+  // Attached client-side (see RecommendationsPanel) from the agent that
+  // produced this card - llm_recommendation cards are ideas-only (no
+  // stop-loss/target/quantity) and render differently.
+  strategy?: string;
   // watchlist_trigger fields
   entry_low?: number;
   entry_high?: number;
@@ -125,6 +136,27 @@ export interface Recommendation {
   proximity_pct?: number;
   already_open?: boolean;
   rationale?: string;
+  cap_size?: "large" | "mid" | "small" | null;
+}
+
+export interface Quote {
+  symbol: string;
+  price: number;
+}
+
+export interface ChargesBreakdown {
+  brokerage: number;
+  stt: number;
+  exchange_txn: number;
+  sebi_charges: number;
+  stamp_duty: number;
+  gst: number;
+  total_charges: number;
+  tax: number;
+  gross_profit: number;
+  net_profit: number;
+  reference_price: number;
+  is_estimate: boolean;
 }
 
 export interface Quote {

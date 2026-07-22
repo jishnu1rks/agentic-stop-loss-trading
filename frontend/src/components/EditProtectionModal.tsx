@@ -9,6 +9,7 @@ import {
   targetPctFromPrice,
   targetPriceFromPct,
 } from "../lib/protection";
+import { netPctAfterCharges } from "../lib/charges";
 
 function fmtDate(d: string | null) {
   if (!d) return "—";
@@ -34,6 +35,7 @@ export default function EditProtectionModal({
   const [slValue, setSlValue] = useState<string>(trade.stop_loss_price ? String(trade.stop_loss_price) : "");
   const [tgtMode, setTgtMode] = useState<ProtectionMode>("price");
   const [tgtValue, setTgtValue] = useState<string>(trade.target_price != null ? String(trade.target_price) : "");
+  const [includeCharges, setIncludeCharges] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,18 +62,24 @@ export default function EditProtectionModal({
   const slHasValue = slValue.trim() !== "" && !Number.isNaN(slNum) && slNum > 0;
   const slPrice = slHasValue ? (slMode === "price" ? slNum : stopLossPriceFromPct(trade.direction, entry, slNum)) : null;
   const slSecondary = slHasValue
-    ? slMode === "price"
-      ? `≈ ${stopLossPctFromPrice(entry, slNum).toFixed(2)}% from entry`
-      : `≈ ${stopLossPriceFromPct(trade.direction, entry, slNum).toFixed(2)}`
+    ? (slMode === "price"
+        ? `≈ ${stopLossPctFromPrice(entry, slNum).toFixed(2)}% from entry`
+        : `≈ ${stopLossPriceFromPct(trade.direction, entry, slNum).toFixed(2)}`) +
+      (includeCharges && slPrice != null
+        ? ` · net of charges ≈ ${netPctAfterCharges(trade.direction, entry, slPrice, trade.quantity).toFixed(2)}%`
+        : "")
     : undefined;
 
   const tgtNum = Number(tgtValue);
   const tgtHasValue = tgtValue.trim() !== "" && !Number.isNaN(tgtNum) && tgtNum > 0;
   const tgtPrice = tgtHasValue ? (tgtMode === "price" ? tgtNum : targetPriceFromPct(trade.direction, entry, tgtNum)) : null;
   const tgtSecondary = tgtHasValue
-    ? tgtMode === "price"
-      ? `≈ ${targetPctFromPrice(entry, tgtNum).toFixed(2)}% from entry`
-      : `≈ ${targetPriceFromPct(trade.direction, entry, tgtNum).toFixed(2)}`
+    ? (tgtMode === "price"
+        ? `≈ ${targetPctFromPrice(entry, tgtNum).toFixed(2)}% from entry`
+        : `≈ ${targetPriceFromPct(trade.direction, entry, tgtNum).toFixed(2)}`) +
+      (includeCharges && tgtPrice != null
+        ? ` · net of charges ≈ ${netPctAfterCharges(trade.direction, entry, tgtPrice, trade.quantity).toFixed(2)}%`
+        : "")
     : undefined;
 
   const handleSave = async () => {
@@ -147,6 +155,11 @@ export default function EditProtectionModal({
       <div style={{ borderTop: "1px solid var(--panel-border)", margin: "14px 0" }} />
 
       {error && <div className="error-banner">{error}</div>}
+
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, marginBottom: 14 }}>
+        <input type="checkbox" checked={includeCharges} onChange={(e) => setIncludeCharges(e.target.checked)} />
+        Include brokerage &amp; other charges in the %/price shown below
+      </label>
 
       <ProtectionField
         label="Stop loss"

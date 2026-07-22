@@ -2,6 +2,7 @@
 future Kite Connect (or other) data source without touching agent logic."""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
@@ -23,3 +24,22 @@ class MarketDataAdapter(ABC):
     @abstractmethod
     def is_market_open(self) -> bool:
         ...
+
+    @abstractmethod
+    def get_trending_symbols(
+        self,
+        sort_by: Literal["dayvolume", "percentchange"] = "dayvolume",
+        limit: int = 15,
+        min_market_cap: float = 5_000_000_000,
+    ) -> list[str]:
+        """Discover a live universe (e.g. today's most-active or biggest
+        movers) rather than relying on a hand-maintained watchlist/index -
+        the "screener" universe type (Section 5.1)."""
+
+    @abstractmethod
+    def get_fundamentals(self, symbol: str) -> dict | None:
+        """Point-in-time valuation/financial-health snapshot for one symbol,
+        used to apply a standard recommendability screen to a "screener"
+        universe (see app.fundamentals). Returns None if nothing usable came
+        back for this symbol - callers must treat that as "unknown", not as
+        a failing score."""

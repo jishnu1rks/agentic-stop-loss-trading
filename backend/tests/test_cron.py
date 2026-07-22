@@ -13,6 +13,12 @@ class FakeMarketDataAdapter(MarketDataAdapter):
     def is_market_open(self):
         return True
 
+    def get_trending_symbols(self, sort_by="dayvolume", limit=15, min_market_cap=5_000_000_000):
+        return list(self.prices.keys())[:limit]
+
+    def get_fundamentals(self, symbol):
+        return None
+
 
 def _make_watchlist_agent(agent_id: str, active: bool) -> Agent:
     return Agent(
@@ -27,8 +33,6 @@ def _make_watchlist_agent(agent_id: str, active: bool) -> Agent:
                 "buy_stop_loss_pct": 2.0,
                 "sell_stop_loss_pct": 2.0,
                 "target_pct": 4.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,
                 "max_concurrent_positions": 5,
                 "max_daily_capital": 50000,
             },

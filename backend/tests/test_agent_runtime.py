@@ -9,9 +9,11 @@ from app.agent_runtime import (
     get_open_positions_pnl,
     modify_protection,
     monitor_open_positions,
+    resolve_universe,
     run_agent_scan,
     stop_loss_price,
     target_price,
+    trade_budget,
 )
 from app.models import Agent, AgentLog, Trade
 
@@ -31,6 +33,12 @@ class FakeMarketDataAdapter(MarketDataAdapter):
 
     def is_market_open(self):
         return True
+
+    def get_trending_symbols(self, sort_by="dayvolume", limit=15, min_market_cap=5_000_000_000):
+        return list(self.prices.keys())[:limit]
+
+    def get_fundamentals(self, symbol):
+        return None
 
 
 # ---- Section 4.1 stop-loss direction table ----
@@ -221,8 +229,6 @@ def _make_watchlist_agent(bands: dict) -> Agent:
                 "buy_stop_loss_pct": 2.0,
                 "sell_stop_loss_pct": 2.0,
                 "target_pct": 4.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,
                 "max_concurrent_positions": 5,
                 "max_daily_capital": 50000,
             },
@@ -287,8 +293,6 @@ def _make_momentum_agent(universe: list[str]) -> Agent:
                 "buy_stop_loss_pct": 2.0,
                 "sell_stop_loss_pct": 2.0,
                 "target_pct": 4.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,
                 "max_concurrent_positions": 10,
                 "max_daily_capital": 100000,
             },
@@ -378,7 +382,10 @@ def test_capital_summary_adds_back_realized_profit(db_session, monkeypatch):
 
 
 def test_agent_scan_skips_entry_when_free_capital_insufficient(db_session, monkeypatch):
-    monkeypatch.setattr("app.agent_runtime.settings.account_starting_capital", 500.0)
+    # Less than the price of a single share (100.0) - there's no fixed
+    # per-trade amount any more, a signal just spends whatever's free, so
+    # this is the only way "not enough capital" can still happen.
+    monkeypatch.setattr("app.agent_runtime.settings.account_starting_capital", 50.0)
     monkeypatch.setattr(
         "app.agent_runtime.get_market_data_adapter",
         lambda: FakeMarketDataAdapter({"FOO": 100.0}),
@@ -396,8 +403,6 @@ def test_agent_scan_skips_entry_when_free_capital_insufficient(db_session, monke
                 "buy_stop_loss_pct": 2.0,
                 "sell_stop_loss_pct": 2.0,
                 "target_pct": 4.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,  # would need 10x the account's free capital
                 "max_concurrent_positions": 5,
                 "max_daily_capital": 50000,
             },
@@ -412,7 +417,7 @@ def test_agent_scan_skips_entry_when_free_capital_insufficient(db_session, monke
     assert db_session.query(Trade).count() == 0
     skipped_log = (
         db_session.query(AgentLog)
-        .filter(AgentLog.decision == "skipped", AgentLog.reason == "insufficient free capital")
+        .filter(AgentLog.decision == "skipped", AgentLog.reason == "insufficient capital for even 1 share")
         .first()
     )
     assert skipped_log is not None
@@ -454,8 +459,6 @@ def test_agent_scan_commits_no_signal_logs_even_with_zero_signals(monkeypatch, t
                 "buy_stop_loss_pct": 2.0,
                 "sell_stop_loss_pct": 2.0,
                 "target_pct": 4.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,
                 "max_concurrent_positions": 5,
                 "max_daily_capital": 50000,
             },
@@ -603,3 +606,56 @@ def test_modify_protection_can_remove_target(db_session, monkeypatch):
     monitor_open_positions(db_session)
     db_session.refresh(trade)
     assert trade.status == "open"
+
+
+# ---- Section 5.1 screener universe - standard fundamentals bar ----
+
+class FakeScreenerAdapter(FakeMarketDataAdapter):
+    def __init__(self, trending: list[str], fundamentals_by_symbol: dict):
+        super().__init__({s: 100.0 for s in trending})
+        self.trending = trending
+        self.fundamentals_by_symbol = fundamentals_by_symbol
+
+    def get_trending_symbols(self, sort_by="dayvolume", limit=15, min_market_cap=5_000_000_000):
+        return self.trending
+
+    def get_fundamentals(self, symbol):
+        return self.fundamentals_by_symbol.get(symbol)
+
+
+def test_resolve_universe_screener_drops_unrecommendable_symbols():
+    adapter = FakeScreenerAdapter(
+        trending=["GOOD", "BAD", "UNKNOWN"],
+        fundamentals_by_symbol={
+            "GOOD": {"debt_to_equity": 40.0, "peg": 0.8, "insider_holding_pct": 0.5},
+            "BAD": {"debt_to_equity": 350.0},  # hard red flag
+        },
+    )
+    config = {"universe": {"type": "screener", "screener": {}}}
+
+    universe = resolve_universe(config, adapter)
+
+    assert "GOOD" in universe
+    assert "BAD" not in universe
+    # A symbol with no fetchable fundamentals is kept, not dropped.
+    assert "UNKNOWN" in universe
+
+
+# ---- Per-trade budget cap (25% of max_daily_capital) ----
+
+def test_trade_budget_caps_at_25pct_of_daily_capital_even_with_ample_free_capital():
+    risk = {"max_daily_capital": 80_000.0}
+    budget = trade_budget(risk, free_capital=1_000_000.0, capital_used_today=0.0)
+    assert budget == 20_000.0
+
+
+def test_trade_budget_still_respects_free_capital_below_the_25pct_cap():
+    risk = {"max_daily_capital": 80_000.0}
+    budget = trade_budget(risk, free_capital=5_000.0, capital_used_today=0.0)
+    assert budget == 5_000.0
+
+
+def test_trade_budget_still_respects_remaining_daily_allowance_below_the_25pct_cap():
+    risk = {"max_daily_capital": 80_000.0}
+    budget = trade_budget(risk, free_capital=1_000_000.0, capital_used_today=75_000.0)
+    assert budget == 5_000.0

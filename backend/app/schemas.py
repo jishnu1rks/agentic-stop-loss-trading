@@ -1,19 +1,27 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---- Agent config (Section 5.2) ----
 
+# Stop-loss/target are always expressed as % of entry price (CMP at fill
+# time), never a currency amount - bounding them here keeps a fat-fingered
+# config (or an intentionally reckless one) from arming a trade with, say,
+# a 50% stop-loss. 0.1% floor blocks an effectively-zero stop that would
+# offer no real protection; 5% ceiling matches this system's risk profile
+# for NSE large/mid-caps (Section 5).
+PCT_LOWER_BOUND = 0.1
+PCT_UPPER_BOUND = 5.0
+
+
 class AgentRiskConfig(BaseModel):
-    buy_stop_loss_pct: float
-    sell_stop_loss_pct: float
-    target_pct: float | None = None
-    position_size_type: Literal["fixed_amount", "pct_capital"] = "fixed_amount"
-    position_size_value: float
-    max_concurrent_positions: int = 5
-    max_daily_capital: float = 100_000.0
+    buy_stop_loss_pct: float = Field(ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
+    sell_stop_loss_pct: float = Field(ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
+    target_pct: float | None = Field(default=None, ge=PCT_LOWER_BOUND, le=PCT_UPPER_BOUND)
+    max_concurrent_positions: int = Field(default=5, ge=1)
+    max_daily_capital: float = Field(default=100_000.0, gt=0)
 
 
 class AgentScheduleConfig(BaseModel):
@@ -22,9 +30,27 @@ class AgentScheduleConfig(BaseModel):
     market_hours_only: bool = True
 
 
+class ScreenerUniverseConfig(BaseModel):
+    """Live NSE discovery instead of a hand-maintained symbol list (Section
+    5.1 "screener" universe type) - see YFinanceMarketDataAdapter.get_trending_symbols."""
+    sort_by: Literal["dayvolume", "percentchange"] = "dayvolume"
+    limit: int = Field(default=15, ge=1, le=50)
+    min_market_cap: float = Field(default=5_000_000_000, gt=0)
+
+
 class AgentUniverseConfig(BaseModel):
-    type: Literal["watchlist", "index"] = "watchlist"
-    value: list[str] | str
+    type: Literal["watchlist", "index", "screener"] = "watchlist"
+    value: list[str] | str | None = None
+    screener: ScreenerUniverseConfig | None = None
+
+    @model_validator(mode="after")
+    def _check_value(self) -> "AgentUniverseConfig":
+        if self.type == "screener":
+            if self.screener is None:
+                self.screener = ScreenerUniverseConfig()
+        elif not self.value:
+            raise ValueError(f"universe.value is required for type '{self.type}'")
+        return self
 
 
 class AgentConfigIn(BaseModel):
@@ -34,8 +60,24 @@ class AgentConfigIn(BaseModel):
     universe: AgentUniverseConfig
     strategy: str
     strategy_params: dict[str, Any] = Field(default_factory=dict)
-    risk: AgentRiskConfig
+    # Recommend-only agents (llm_recommendation - Section 5.2's Recommending
+    # agent) never size or protect a position themselves, so they carry no
+    # risk config at all; every other strategy actually enters trades and
+    # must have one.
+    risk: AgentRiskConfig | None = None
     schedule: AgentScheduleConfig
+
+    @model_validator(mode="after")
+    def _check_llm_recommendation_prompt(self) -> "AgentConfigIn":
+        if self.strategy == "llm_recommendation" and not (self.strategy_params.get("prompt") or "").strip():
+            raise ValueError("strategy_params.prompt is required for the llm_recommendation strategy")
+        return self
+
+    @model_validator(mode="after")
+    def _check_risk_required_for_trading_strategies(self) -> "AgentConfigIn":
+        if self.strategy != "llm_recommendation" and self.risk is None:
+            raise ValueError("risk is required for a strategy that places trades")
+        return self
 
 
 class AgentOut(BaseModel):

@@ -71,8 +71,6 @@ def seed():
                 "buy_stop_loss_pct": 1.5,
                 "sell_stop_loss_pct": 1.5,
                 "target_pct": 3.0,
-                "position_size_type": "fixed_amount",
-                "position_size_value": 10000,
                 "max_concurrent_positions": 5,
                 "max_daily_capital": 50000,
             },
