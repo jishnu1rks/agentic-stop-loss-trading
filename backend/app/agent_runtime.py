@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.adapters.broker import get_broker_adapter
 from app.adapters.broker.base import Direction
 from app.adapters.market_data import get_market_data_adapter
+from app.adapters.market_data.base import MarketDataSnapshot
 from app.adapters.market_data.yfinance_adapter import IST, MarketDataUnavailableError
 from app.charges import compute_charges
 from app.config import settings
@@ -184,45 +185,74 @@ def _deserialize_signals(signals_json: str) -> list[Signal]:
 def get_or_scan_llm_signals(
     db: Session,
     cache_key: str,
-    universe: list[str],
-    snapshot,
-    strategy_params: dict,
-) -> list[Signal]:
-    """Throttled front door for the llm_recommendation strategy's .scan():
-    at most one real LLM call per rolling hour, and only within an
-    11:00-15:00 IST window - every other call (scheduler tick or
-    on-demand recommendations fetch) reuses the cached result instead.
-    Outside the window, falls back to the last cached result (or an empty
-    list if none exists yet) rather than blocking entirely, so the
+    config: dict,
+    market_data_adapter,
+) -> tuple[list[str], MarketDataSnapshot, list[Signal]]:
+    """Throttled front door for the llm_recommendation strategy's full
+    Scan step (universe resolution + market snapshot + LLM call): at most
+    one real LLM call per rolling hour, and only within an 11:00-15:00 IST
+    window - every other call (scheduler tick or on-demand recommendations
+    fetch) reuses the cached universe/signals instead of re-running any of
+    it. Outside the window, falls back to the last cached universe/result
+    (or empty if none exists yet) rather than blocking entirely, so the
     dashboard doesn't go blank outside trading hours.
+
+    Universe resolution is cached alongside the signals - not just the LLM
+    call - because get_tiered_trending_symbols hits Yahoo's unofficial
+    screener endpoint 3x per scan (one per cap tier), which is the part
+    that actually gets rate-limited in practice; re-running it on every
+    dashboard load defeated the point of throttling the LLM call. The
+    price snapshot is still fetched fresh every call (a separate,
+    less rate-limit-prone yfinance endpoint) so displayed prices stay live
+    even when the universe/signals are served from cache.
 
     cache_key is always the Recommending agent's own agent_id, even when
     called on behalf of an llm_recommendation_execution agent mirroring
     its prompt/universe (see _find_recommend_only_agent) - the two share
     one cache entry rather than each spending their own quota."""
+    strategy_params = config.get("strategy_params", {})
+    lookback_days = strategy_params.get("lookback_days", 20)
     now_utc = datetime.now(timezone.utc)
     now_ist = now_utc.astimezone(IST)
     cached = db.query(LlmSignalCache).filter_by(agent_id=cache_key).first()
+    cache_usable = bool(cached and cached.universe_json)
 
-    if cached:
+    def _from_cache() -> tuple[list[str], MarketDataSnapshot, list[Signal]]:
+        universe = json.loads(cached.universe_json)
+        snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
+        return universe, snapshot, _deserialize_signals(cached.signals_json)
+
+    if cache_usable:
         scanned_at = cached.scanned_at
         if scanned_at.tzinfo is None:
             scanned_at = scanned_at.replace(tzinfo=timezone.utc)
         if now_utc - scanned_at < LLM_SCAN_MIN_INTERVAL:
-            return _deserialize_signals(cached.signals_json)
+            return _from_cache()
 
     if not (LLM_SCAN_WINDOW_START <= now_ist.time() <= LLM_SCAN_WINDOW_END):
-        return _deserialize_signals(cached.signals_json) if cached else []
+        if cache_usable:
+            return _from_cache()
+        return [], MarketDataSnapshot(prices={}, history={}, volumes={}), []
 
+    universe = resolve_universe(config, market_data_adapter)
+    snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
     signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
 
     if cached:
+        cached.universe_json = json.dumps(universe)
         cached.signals_json = _serialize_signals(signals)
         cached.scanned_at = now_utc
     else:
-        db.add(LlmSignalCache(agent_id=cache_key, signals_json=_serialize_signals(signals), scanned_at=now_utc))
+        db.add(
+            LlmSignalCache(
+                agent_id=cache_key,
+                universe_json=json.dumps(universe),
+                signals_json=_serialize_signals(signals),
+                scanned_at=now_utc,
+            )
+        )
     db.commit()
-    return signals
+    return universe, snapshot, signals
 
 
 def _cap_size_for(symbol: str, market_data_adapter) -> str | None:
@@ -483,16 +513,11 @@ def build_llm_recommendations(db: Session, agent: Agent) -> list[dict]:
     decides real sizing and risk if they act on one."""
     market_data_adapter = get_market_data_adapter()
     config = agent.config
-    universe = resolve_universe(config, market_data_adapter)
-    strategy_params = config.get("strategy_params", {})
     open_symbols = _open_symbols(db, agent.agent_id)
     free_capital = get_capital_summary(db)["free_capital"]
     budget = free_capital * RECOMMENDATION_BUDGET_PCT_OF_FREE_CAPITAL
 
-    snapshot = market_data_adapter.get_snapshot(
-        universe, lookback_days=strategy_params.get("lookback_days", 20)
-    )
-    signals = get_or_scan_llm_signals(db, agent.agent_id, universe, snapshot, strategy_params)
+    _universe, snapshot, signals = get_or_scan_llm_signals(db, agent.agent_id, config, market_data_adapter)
 
     recommendations = []
     for signal in signals:
@@ -571,16 +596,11 @@ def build_llm_execution_recommendations(db: Session, agent: Agent) -> list[dict]
         return []
 
     source_config = source_agent.config
-    universe = resolve_universe(source_config, market_data_adapter)
-    strategy_params = source_config.get("strategy_params", {})
     risk = agent.config["risk"]
     open_symbols = _open_symbols(db, agent.agent_id)
     budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
 
-    snapshot = market_data_adapter.get_snapshot(
-        universe, lookback_days=strategy_params.get("lookback_days", 20)
-    )
-    signals = get_or_scan_llm_signals(db, source_agent.agent_id, universe, snapshot, strategy_params)
+    _universe, snapshot, signals = get_or_scan_llm_signals(db, source_agent.agent_id, source_config, market_data_adapter)
     signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
 
     recommendations = []
@@ -857,25 +877,22 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         llm_cache_key = source_agent.agent_id
 
     try:
-        universe = resolve_universe(scan_config, market_data_adapter)
-        snapshot = market_data_adapter.get_snapshot(
-            universe, lookback_days=scan_config.get("strategy_params", {}).get("lookback_days", 20)
-        )
+        if agent.strategy in ("llm_recommendation", "llm_recommendation_execution"):
+            # Throttled: at most 1 real universe-resolve + LLM call per
+            # rolling hour, only 11:00-15:00 IST - see get_or_scan_llm_signals.
+            universe, snapshot, signals = get_or_scan_llm_signals(db, llm_cache_key, scan_config, market_data_adapter)
+        else:
+            universe = resolve_universe(scan_config, market_data_adapter)
+            snapshot = market_data_adapter.get_snapshot(
+                universe, lookback_days=scan_config.get("strategy_params", {}).get("lookback_days", 20)
+            )
+            strategy = get_strategy(agent.strategy)
+            signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
     except MarketDataUnavailableError as exc:
         # Section 9 fail-safe: pause rather than act on stale/missing data.
         _log(db, agent.agent_id, None, "paused", f"market data unavailable: {exc}")
         db.commit()
         return
-
-    if agent.strategy in ("llm_recommendation", "llm_recommendation_execution"):
-        # Throttled: at most 1 real LLM call/hour, only 11:00-15:00 IST -
-        # see get_or_scan_llm_signals.
-        signals = get_or_scan_llm_signals(
-            db, llm_cache_key, universe, snapshot, scan_config.get("strategy_params", {})
-        )
-    else:
-        strategy = get_strategy(agent.strategy)
-        signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
 
     if agent.strategy == "llm_recommendation_execution":
         signals = _filter_execution_signals(signals, config.get("strategy_params", {}))

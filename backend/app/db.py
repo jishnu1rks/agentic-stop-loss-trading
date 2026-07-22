@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
@@ -27,3 +27,19 @@ def get_db():
 def init_db():
     from app import models  # noqa: F401 - register models on Base before create_all
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns():
+    """No Alembic in this project (create_all only creates missing tables,
+    never alters existing ones) - this is the lightweight stand-in for the
+    one column added after llm_signal_cache already existed in a deployed
+    database. ADD COLUMN is supported the same way by SQLite and Postgres,
+    the only two engines this app targets."""
+    inspector = inspect(engine)
+    if "llm_signal_cache" not in inspector.get_table_names():
+        return
+    existing_columns = {c["name"] for c in inspector.get_columns("llm_signal_cache")}
+    if "universe_json" not in existing_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE llm_signal_cache ADD COLUMN universe_json TEXT"))

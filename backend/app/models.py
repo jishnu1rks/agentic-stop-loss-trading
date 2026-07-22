@@ -106,6 +106,13 @@ class LlmSignalCache(Base):
     __tablename__ = "llm_signal_cache"
 
     agent_id = Column(String, ForeignKey("agents.agent_id"), primary_key=True)
+    # The resolved universe (symbol list) from the same scan that produced
+    # signals_json - cached alongside it so a cache hit skips the screener
+    # entirely (the expensive, rate-limit-prone part - see get_tiered_trending_symbols)
+    # rather than only skipping the LLM call. Nullable for rows written
+    # before this column existed (see app.db.init_db's inline migration);
+    # get_or_scan_llm_signals treats a null value as "not usable, re-scan."
+    universe_json = Column(Text, nullable=True)
     signals_json = Column(Text, nullable=False)
     scanned_at = Column(DateTime(timezone=True), nullable=False)
 
