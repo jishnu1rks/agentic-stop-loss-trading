@@ -159,6 +159,26 @@ export interface ChargesBreakdown {
   is_estimate: boolean;
 }
 
+export interface Quote {
+  symbol: string;
+  price: number;
+}
+
+export interface ChargesBreakdown {
+  brokerage: number;
+  stt: number;
+  exchange_txn: number;
+  sebi_charges: number;
+  stamp_duty: number;
+  gst: number;
+  total_charges: number;
+  tax: number;
+  gross_profit: number;
+  net_profit: number;
+  reference_price: number;
+  is_estimate: boolean;
+}
+
 export interface ManualTradeInput {
   stock_symbol: string;
   direction: Direction;

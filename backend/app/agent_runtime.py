@@ -951,6 +951,35 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     db.commit()
 
 
+def estimate_trade_charges(trade: Trade, reference_price: float) -> dict:
+    """Itemized charge + tax breakdown for the Net P&L breakup popup. For a
+    closed trade, reference_price is the actual sell_price, so this
+    reconstructs the same numbers already stored on trade.charges/trade.tax
+    (those only store the totals, not the line items). For an open trade,
+    reference_price is the latest quote - an estimate of what closing right
+    now would cost, not yet finalized (finalization happens in close_trade)."""
+    breakdown = compute_charges(trade.direction, trade.buy_price, reference_price, trade.quantity)
+    gross = (reference_price - trade.buy_price) * trade.quantity
+    if trade.direction == "sell":
+        gross = -gross  # short: profit when price falls
+    tax = estimate_tax(gross, breakdown.total)
+
+    return {
+        "brokerage": breakdown.brokerage,
+        "stt": breakdown.stt,
+        "exchange_txn": breakdown.exchange_txn,
+        "sebi_charges": breakdown.sebi_charges,
+        "stamp_duty": breakdown.stamp_duty,
+        "gst": breakdown.gst,
+        "total_charges": breakdown.total,
+        "tax": tax,
+        "gross_profit": round(gross, 2),
+        "net_profit": round(gross - breakdown.total - tax, 2),
+        "reference_price": round(reference_price, 2),
+        "is_estimate": trade.status == "open",
+    }
+
+
 def force_close(db: Session, trade: Trade, current_price: float, exit_reason: str) -> None:
     """Close a trade outside the normal GTT-trigger path: user-initiated
     early close (Section 7.7) or a time-based exit rule (Section 4)."""
