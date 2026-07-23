@@ -38,7 +38,10 @@ class Agent(Base):
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), default=_now)
 
-    trades = relationship("Trade", back_populates="agent")
+    # Trade now has two FKs to agents (agent_id, source_agent_id) - both
+    # relationships must pin foreign_keys explicitly, otherwise SQLAlchemy
+    # can't tell which column each join should use.
+    trades = relationship("Trade", back_populates="agent", foreign_keys="Trade.agent_id")
     logs = relationship("AgentLog", back_populates="agent")
 
 
@@ -49,6 +52,13 @@ class Trade(Base):
 
     trade_id = Column(String, primary_key=True, default=_uuid)
     agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    # The Recommending agent whose signal led to this trade - only ever set
+    # for llm_recommendation_execution trades (see _find_recommend_only_agent
+    # in agent_runtime.py); null for manual trades and every other strategy,
+    # and null for trades placed before this column existed. Lets the trade
+    # log show which Recommending agent actually flagged a stock, not just
+    # which agent placed the order.
+    source_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
     stock_symbol = Column(String, nullable=False)
     direction = Column(Enum("buy", "sell", name="trade_direction"), nullable=False)
     quantity = Column(Integer, nullable=False)
@@ -91,7 +101,7 @@ class Trade(Base):
     created_at = Column(DateTime(timezone=True), default=_now)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 
-    agent = relationship("Agent", back_populates="trades")
+    agent = relationship("Agent", back_populates="trades", foreign_keys=[agent_id])
 
 
 class LlmSignalCache(Base):

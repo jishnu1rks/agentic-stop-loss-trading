@@ -5,6 +5,10 @@ export type ExitReason = "stop_loss" | "target" | "manual" | "timeout";
 export interface Trade {
   trade_id: string;
   agent_id: string | null;
+  // The Recommending agent whose signal led to this trade - only ever set
+  // for llm_recommendation_execution trades; null for manual trades, every
+  // other strategy, and trades placed before this field existed.
+  source_agent_id: string | null;
   stock_symbol: string;
   direction: Direction;
   quantity: number;
@@ -24,6 +28,23 @@ export interface Trade {
   status: TradeStatus;
   broker_order_id: string | null;
   is_manual: boolean;
+}
+
+// GET /trades/stats - aggregated over the whole period-filtered set on the
+// backend, independent of list_trades' pagination (see TradeLogTable.tsx).
+export interface TradeStats {
+  count: number;
+  gross_pnl: number;
+  net_pnl: number;
+  charges: number;
+  tax: number;
+  win_rate: number;
+  // Capital card - all period-scoped except current_capital (there's only
+  // one "now"). first_trade_date is the earliest trade *within* the
+  // selected period, not the account's all-time first trade.
+  capital_at_period_start: number;
+  current_capital: number;
+  first_trade_date: string | null;
 }
 
 export interface OpenPositionPnl {
@@ -120,6 +141,15 @@ export interface Recommendation {
   // produced this card - llm_recommendation cards are ideas-only (no
   // stop-loss/target/quantity) and render differently.
   strategy?: string;
+  // Attached client-side alongside `strategy` - the agent's own name (e.g.
+  // "RE 1"/"RE 2"), so a BUY/SELL IDEA card can show which Recommending
+  // agent produced it.
+  agentName?: string;
+  // Backend-provided, llm_recommendation_execution cards only: the name of
+  // the Recommending agent whose signal this mirrors (see
+  // _find_recommend_only_agent) - which Recommending agent a BUY/SELL
+  // SIGNAL card traces back to.
+  source_agent_name?: string | null;
   // watchlist_trigger fields
   entry_low?: number;
   entry_high?: number;

@@ -96,6 +96,7 @@ class AgentOut(BaseModel):
 class TradeOut(BaseModel):
     trade_id: str
     agent_id: str | None
+    source_agent_id: str | None
     stock_symbol: str
     direction: str
     quantity: int

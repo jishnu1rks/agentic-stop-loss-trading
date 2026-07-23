@@ -30,16 +30,24 @@ def init_db():
     _add_missing_columns()
 
 
+_MISSING_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, DDL type) - columns added after their table already
+    # existed in a deployed database. No Alembic in this project (create_all
+    # only creates missing tables, never alters existing ones), so this is
+    # the lightweight stand-in - ADD COLUMN is supported the same way by
+    # SQLite and Postgres, the only two engines this app targets.
+    ("llm_signal_cache", "universe_json", "TEXT"),
+    ("trades", "source_agent_id", "VARCHAR"),
+]
+
+
 def _add_missing_columns():
-    """No Alembic in this project (create_all only creates missing tables,
-    never alters existing ones) - this is the lightweight stand-in for the
-    one column added after llm_signal_cache already existed in a deployed
-    database. ADD COLUMN is supported the same way by SQLite and Postgres,
-    the only two engines this app targets."""
     inspector = inspect(engine)
-    if "llm_signal_cache" not in inspector.get_table_names():
-        return
-    existing_columns = {c["name"] for c in inspector.get_columns("llm_signal_cache")}
-    if "universe_json" not in existing_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE llm_signal_cache ADD COLUMN universe_json TEXT"))
+    existing_tables = set(inspector.get_table_names())
+    for table, column, ddl_type in _MISSING_COLUMNS:
+        if table not in existing_tables:
+            continue
+        existing_columns = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))

@@ -60,7 +60,7 @@ function fetchRecommendations(
       recoAgents.map((a) =>
         api
           .agentRecommendations(a.agent_id, force)
-          .then((recos) => recos.map((r) => ({ ...r, strategy: a.strategy })))
+          .then((recos) => recos.map((r) => ({ ...r, strategy: a.strategy, agentName: a.name })))
           .catch(() => [] as Recommendation[])
           .then((tagged) => {
             recosByAgent[a.agent_id] = tagged;
@@ -116,6 +116,7 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
             <div className="reco-timestamp">
               {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
               {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
+              {reco.agentName && ` · ${reco.agentName}`}
             </div>
           </div>
           <span className={`pill ${reco.direction === "sell" ? "sell" : "buy"}`}>
@@ -154,10 +155,6 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
 
         <div className="reco-rationale">{reco.rationale}</div>
         {reco.already_open && <div className="reco-open-badge">● Position already open for this symbol</div>}
-        <div className="field-hint" style={{ marginTop: 10 }}>
-          Idea only - illustrative target/stop-loss/qty, this agent doesn't place trades. Use a manual trade or an
-          Execution agent to act on it.
-        </div>
       </div>
     );
   }
@@ -195,6 +192,7 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
           <div className="reco-timestamp">
             {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
             {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
+            {isLlmSignal && reco.source_agent_name && ` · via ${reco.source_agent_name}`}
           </div>
         </div>
         <span

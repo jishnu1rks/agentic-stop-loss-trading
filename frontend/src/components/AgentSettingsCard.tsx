@@ -13,16 +13,6 @@ const STRATEGY_DESCRIPTIONS: Record<string, string> = {
     "Watches a fixed list of symbols you've configured and enters a trade only when price crosses the specific level you've set for that symbol.",
 };
 
-// The fundamentals health/valuation screen every screener-sourced universe
-// symbol must clear before an agent (or the AI) ever sees it - see backend
-// app/fundamentals.py:is_recommendable, applied in agent_runtime.filter_recommendable.
-const ELIGIBILITY_CRITERIA_NOTE =
-  "Eligibility filter: before reaching this agent (or the AI), every symbol from the live screener must clear a " +
-  "fundamentals health/valuation check - hard-disqualified outright if Debt/Equity is 3x or more, or earnings " +
-  "growth has collapsed below -50%. Otherwise it's scored on Debt/Equity, PEG, revenue/earnings growth, insider " +
-  "holding %, and P/B (whichever of these are available), and must score at least 50% to pass. A symbol with no " +
-  "fundamentals data at all is kept (treated as neutral) rather than excluded for a data gap.";
-
 function strategyDescription(strategy: string): string {
   return STRATEGY_DESCRIPTIONS[strategy] ?? "Scans its configured stocks on the schedule below and enters trades according to its configured strategy.";
 }
@@ -167,19 +157,6 @@ export default function AgentSettingsCard({
       </div>
 
       <div className="agent-description">{strategyDescription(agent.strategy)}</div>
-
-      {(isLlmRecommendation || isExecutionAgent) && (
-        <div className="field-hint" style={{ marginBottom: 12 }}>
-          MVP limit: AI scans run at most once per hour, only between 11:00 AM-3:00 PM, to conserve API quota. Not
-          yet user-editable - will be made configurable later.
-        </div>
-      )}
-
-      {(isLlmRecommendation || isExecutionAgent) && (
-        <div className="field-hint" style={{ marginBottom: 12 }}>
-          {ELIGIBILITY_CRITERIA_NOTE}
-        </div>
-      )}
 
       {error && <div className="error-banner">{error}</div>}
 

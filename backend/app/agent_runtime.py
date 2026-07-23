@@ -92,10 +92,19 @@ def _open_position_count(db: Session, agent_id: str) -> int:
 
 
 def _capital_committed_today(db: Session, agent_id: str) -> float:
+    """Only counts trades entered today that are still open - a closed
+    trade's capital is back in the free-capital pool, so it shouldn't also
+    keep counting against today's max_daily_capital allowance. (A position
+    opened on an earlier day and still open today isn't included either -
+    it was already charged against the day it was actually entered.)"""
     today = datetime.now(timezone.utc).date()
     rows = (
-        db.query(Trade.buy_price, Trade.quantity, Trade.direction)
-        .filter(Trade.agent_id == agent_id, func.date(Trade.purchase_date) == str(today))
+        db.query(Trade.buy_price, Trade.quantity)
+        .filter(
+            Trade.agent_id == agent_id,
+            func.date(Trade.purchase_date) == str(today),
+            Trade.status == "open",
+        )
         .all()
     )
     return sum(r.buy_price * r.quantity for r in rows)
@@ -648,6 +657,7 @@ def build_llm_execution_recommendations(db: Session, agent: Agent, force: bool =
                 "already_open": signal.symbol in open_symbols,
                 "rationale": signal.reason,
                 "cap_size": _cap_size_for(signal.symbol, market_data_adapter),
+                "source_agent_name": source_agent.name,
             }
         )
     return recommendations
@@ -664,8 +674,13 @@ def enter_position(
     sell_stop_loss_pct: float | None,
     target_pct: float | None,
     is_manual: bool = False,
+    source_agent_id: str | None = None,
 ) -> Trade:
-    """Entry + Protect (Section 4 steps 3-4), shared by agents and manual trades."""
+    """Entry + Protect (Section 4 steps 3-4), shared by agents and manual
+    trades. source_agent_id is only ever passed for llm_recommendation_execution
+    trades - the Recommending agent whose signal this mirrors (see
+    run_agent_scan) - so the trade log can show which Recommending agent
+    actually flagged the stock, not just which agent placed the order."""
     broker = get_broker_adapter()
     trade_id = str(uuid.uuid4())
 
@@ -681,6 +696,7 @@ def enter_position(
     trade = Trade(
         trade_id=trade_id,
         agent_id=agent_id,
+        source_agent_id=source_agent_id,
         stock_symbol=symbol,
         direction=direction,
         quantity=fill.quantity,
@@ -952,6 +968,7 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         enter_position(
             db,
             agent_id=agent.agent_id,
+            source_agent_id=llm_cache_key if agent.strategy == "llm_recommendation_execution" else None,
             symbol=signal.symbol,
             direction=signal.direction,
             quantity=qty,

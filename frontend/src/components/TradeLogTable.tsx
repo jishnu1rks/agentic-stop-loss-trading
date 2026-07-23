@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import type { Agent, OpenPositionPnl, Trade } from "../api/types";
+import type { Agent, OpenPositionPnl, Trade, TradeStats } from "../api/types";
 import Modal from "./Modal";
 import EditProtectionModal from "./EditProtectionModal";
 import ChargesBreakdownModal from "./ChargesBreakdownModal";
 import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
-type Period = "all" | "week" | "month" | "year";
+type Period = "today" | "all" | "week" | "month" | "year";
+
+// Period filtering, sorting, and stats aggregation all happen server-side
+// now (GET /trades?period=...&sort_by=...&limit=...&offset=... and
+// GET /trades/stats) so pagination can't produce wrong period totals or a
+// cross-page sort order - see backend/app/routers/trades.py.
+const PAGE_SIZE = 15;
 
 function fmtDateOnly(d: string | null) {
   if (!d) return "—";
@@ -16,32 +22,6 @@ function fmtDateOnly(d: string | null) {
 
 function fmtMoney(n: number) {
   return n.toLocaleString("en-IN", { maximumFractionDigits: 0 });
-}
-
-// Calendar-bucketed range for the period filter, mirroring the dashboard
-// KPIs' "this month" convention rather than a rolling N-day window.
-function periodRange(period: Period, now: Date): [Date, Date] | null {
-  if (period === "all") return null;
-  if (period === "week") {
-    // ISO week: Monday 00:00 through next Monday 00:00.
-    const day = (now.getDay() + 6) % 7; // 0 = Monday
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day);
-    const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
-    return [start, end];
-  }
-  if (period === "month") {
-    return [new Date(now.getFullYear(), now.getMonth(), 1), new Date(now.getFullYear(), now.getMonth() + 1, 1)];
-  }
-  return [new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear() + 1, 0, 1)];
-}
-
-function inPeriod(t: Trade, period: Period, now: Date): boolean {
-  const range = periodRange(period, now);
-  if (!range) return true;
-  const dateStr = t.sell_date ?? t.purchase_date;
-  if (!dateStr) return false;
-  const d = new Date(dateStr);
-  return d >= range[0] && d < range[1];
 }
 
 type Column = {
@@ -64,9 +44,13 @@ export default function TradeLogTable({
   showPeriodFilter?: boolean;
 }) {
   const [trades, setTrades] = useState<Trade[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [stats, setStats] = useState<TradeStats | null>(null);
   const [period, setPeriod] = useState<Period>("all");
   const [pnlByTradeId, setPnlByTradeId] = useState<Record<string, OpenPositionPnl>>({});
   const [agentNameById, setAgentNameById] = useState<Record<string, string>>({});
+  const [agentStrategyById, setAgentStrategyById] = useState<Record<string, string>>({});
   const [statusFilter] = useState(lockedStatus ?? "");
   const [directionFilter] = useState("");
   const [exitReasonFilter] = useState("");
@@ -83,32 +67,104 @@ export default function TradeLogTable({
   const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
 
   const isOpenView = lockedStatus === "open";
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  // Read inside loadPage via the ref (not the `trades` state binding) so an
+  // IntersectionObserver callback created before the latest fetch settled
+  // still computes the correct next offset - see the observer effect below.
+  const tradesRef = useRef<Trade[]>(trades);
+  tradesRef.current = trades;
 
-  const load = () => {
-    const params: Record<string, string> = {};
+  const filterParams = (): Record<string, string | number | boolean | undefined> => {
+    const params: Record<string, string | number | boolean | undefined> = {
+      sort_by: sortKey,
+      sort_dir: sortDir,
+    };
     if (statusFilter) params.status = statusFilter;
     if (directionFilter) params.direction = directionFilter;
     if (exitReasonFilter) params.exit_reason = exitReasonFilter;
     if (sourceFilter) params.is_manual = sourceFilter === "manual" ? "true" : "false";
-    api.listTrades(params).then(setTrades).catch(() => setTrades([]));
+    if (showPeriodFilter) params.period = period;
+    return params;
+  };
+
+  // reset=true replaces the loaded set from offset 0 (mount, or any filter/
+  // sort/period change); reset=false appends the next page (scroll-triggered
+  // "load more" - only relevant on the paginated History view).
+  const loadPage = (reset: boolean) => {
+    const offset = reset ? 0 : tradesRef.current.length;
+    const params = filterParams();
+    if (showPeriodFilter) {
+      params.limit = PAGE_SIZE;
+      params.offset = offset;
+    }
+    if (!reset) setLoadingMore(true);
+    api
+      .listTrades(params)
+      .then((page) => {
+        setTrades((prev) => (reset ? page : [...prev, ...page]));
+        setHasMore(showPeriodFilter ? page.length === PAGE_SIZE : false);
+      })
+      .catch(() => {
+        if (reset) setTrades([]);
+      })
+      .finally(() => setLoadingMore(false));
+  };
+
+  useEffect(() => {
+    loadPage(true);
     if (statusFilter !== "closed") {
       api.openPositionsPnl().then(setPnlByTradeId).catch(() => setPnlByTradeId({}));
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, directionFilter, exitReasonFilter, sourceFilter, period, sortKey, sortDir]);
 
-  useEffect(load, [statusFilter, directionFilter, exitReasonFilter, sourceFilter]);
+  // Stats (P&L/win-rate cards) are aggregated server-side over the whole
+  // period-filtered set - independent of how many rows have been scrolled
+  // into view, since `trades` is only ever a partial page once paginated.
+  useEffect(() => {
+    if (!showPeriodFilter) return;
+    const params: Record<string, string | boolean | undefined> = { period };
+    if (statusFilter) params.status = statusFilter;
+    api.tradeStats(params).then(setStats).catch(() => setStats(null));
+  }, [showPeriodFilter, statusFilter, period]);
+
+  // Scroll-triggered "load more": watches a sentinel element rendered just
+  // after the table rather than a specific scroll container, so it works
+  // regardless of which ancestor actually scrolls.
+  useEffect(() => {
+    if (!showPeriodFilter || !hasMore) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !loadingMore) {
+          loadPage(false);
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPeriodFilter, hasMore, loadingMore]);
 
   useEffect(() => {
     api
       .listAgents()
       .then((agents: Agent[]) => {
-        const map: Record<string, string> = {};
+        const names: Record<string, string> = {};
+        const strategies: Record<string, string> = {};
         agents.forEach((a) => {
-          map[a.agent_id] = a.name;
+          names[a.agent_id] = a.name;
+          strategies[a.agent_id] = a.strategy;
         });
-        setAgentNameById(map);
+        setAgentNameById(names);
+        setAgentStrategyById(strategies);
       })
-      .catch(() => setAgentNameById({}));
+      .catch(() => {
+        setAgentNameById({});
+        setAgentStrategyById({});
+      });
   }, []);
 
   // Unrealized P&L on open positions is only as fresh as the last fetch -
@@ -121,39 +177,6 @@ export default function TradeLogTable({
     }, 15 * 60 * 1000);
     return () => clearInterval(id);
   }, [statusFilter]);
-
-  const periodFiltered = useMemo(() => {
-    if (!showPeriodFilter) return trades;
-    const now = new Date();
-    return trades.filter((t) => inPeriod(t, period, now));
-  }, [trades, period, showPeriodFilter]);
-
-  const stats = useMemo(() => {
-    if (!showPeriodFilter) return null;
-    const grossPnl = periodFiltered.reduce((sum, t) => sum + (t.gross_profit ?? 0), 0);
-    const netPnl = periodFiltered.reduce((sum, t) => sum + (t.net_profit ?? 0), 0);
-    const charges = periodFiltered.reduce((sum, t) => sum + (t.charges ?? 0), 0);
-    const tax = periodFiltered.reduce((sum, t) => sum + (t.tax ?? 0), 0);
-    const wins = periodFiltered.filter((t) => (t.net_profit ?? 0) > 0).length;
-    const winRate = periodFiltered.length ? (wins / periodFiltered.length) * 100 : 0;
-    // Math check: netPnl should equal (grossPnl - charges - tax), allowing for rounding
-    return { count: periodFiltered.length, grossPnl, netPnl, charges, tax, winRate };
-  }, [periodFiltered, showPeriodFilter]);
-
-  const sorted = useMemo(() => {
-    const copy = [...periodFiltered];
-    copy.sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1;
-      if (bv == null) return -1;
-      if (av < bv) return sortDir === "asc" ? -1 : 1;
-      if (av > bv) return sortDir === "asc" ? 1 : -1;
-      return 0;
-    });
-    return copy;
-  }, [periodFiltered, sortKey, sortDir]);
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -169,7 +192,7 @@ export default function TradeLogTable({
     try {
       await api.closeTrade(tradeId);
       setConfirmClose(null);
-      load();
+      loadPage(true);
       onChanged?.();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to close trade");
@@ -204,6 +227,13 @@ export default function TradeLogTable({
     if (t.status === "open") return pnl ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : "";
     return (t.net_profit ?? 0) >= 0 ? "text-green" : "text-red";
   };
+  // Open Trades' CMP cell is colored by the same profit/loss sign that used
+  // to color the P&L cell there - the P&L cell itself is intentionally
+  // uncolored on that view now.
+  const currentPriceClass = (t: Trade, pnl?: OpenPositionPnl): string => {
+    if (t.status !== "open" || !pnl) return "";
+    return pnl.unrealized_pnl >= 0 ? "text-green" : "text-red";
+  };
 
   const cols: Record<string, Column> = {
     stock: {
@@ -220,6 +250,7 @@ export default function TradeLogTable({
       id: "current_price",
       label: "CMP",
       cell: (t, pnl) => (t.status === "open" && pnl ? `${pnl.current_price.toFixed(2)}` : "—"),
+      cellClassName: currentPriceClass,
     },
     direction: {
       id: "direction",
@@ -296,6 +327,10 @@ export default function TradeLogTable({
       cellClassName: (t) => (t.gross_profit != null ? (t.gross_profit >= 0 ? "text-green" : "text-red") : ""),
     },
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
+    // Open Trades view: same figure as netPnlCell (unrealized P&L isn't
+    // really "net" vs "gross" - there's no exit charge/tax yet to net out),
+    // just relabeled and left uncolored since CMP carries the color there now.
+    openPnl: { id: "open_pnl", label: "P & L", sortKey: "net_profit", cell: netPnlCell },
     charges: {
       id: "charges",
       label: "Charges",
@@ -311,12 +346,18 @@ export default function TradeLogTable({
     },
     mode: {
       id: "mode",
-      label: "Mode",
-      cell: (t) => (
-        <span title={t.is_manual ? "Manual" : (t.agent_id ? (agentNameById[t.agent_id] ?? t.agent_id) : "Agent")}>
-          {t.is_manual ? "👆" : "🤖"}
-        </span>
-      ),
+      label: "Agent",
+      cell: (t) => {
+        if (t.is_manual) return <span title="Manual trade">👆</span>;
+        // An Execution agent's own name isn't the interesting info here -
+        // show the Recommending agent whose signal actually led to this
+        // trade instead (source_agent_id, populated since that field was
+        // added; older execution trades predate it and show nothing extra).
+        const actingStrategy = t.agent_id ? agentStrategyById[t.agent_id] : undefined;
+        const displayAgentId = actingStrategy === "llm_recommendation_execution" ? t.source_agent_id : t.agent_id;
+        const label = displayAgentId ? (agentNameById[displayAgentId] ?? displayAgentId) : "";
+        return <span title={label}>🤖 {label}</span>;
+      },
     },
     actions: {
       id: "actions",
@@ -338,23 +379,22 @@ export default function TradeLogTable({
     ? [
         cols.stock,
         cols.direction,
-        cols.buyPrice,
         cols.qty,
         cols.currentPrice,
+        cols.openPnl,
         cols.stopLoss,
         cols.target,
-        cols.netPnl,
         cols.mode,
         cols.actions,
       ]
     : [
         cols.stock,
-        cols.buyDate,
-        cols.sellDate,
         cols.investmentAmount,
         cols.profitLoss,
         cols.charges,
         cols.netPnl,
+        cols.buyDate,
+        cols.sellDate,
         cols.mode,
       ];
 
@@ -363,9 +403,9 @@ export default function TradeLogTable({
       {showPeriodFilter && (
         <>
           <div className="period-filter">
-            {(["all", "week", "month", "year"] as Period[]).map((p) => (
+            {(["today", "all", "week", "month", "year"] as Period[]).map((p) => (
               <button key={p} className={p === period ? "active" : ""} onClick={() => setPeriod(p)}>
-                {p === "all" ? "All time" : `This ${p}`}
+                {p === "today" ? "Today" : p === "all" ? "All time" : `This ${p}`}
               </button>
             ))}
           </div>
@@ -373,12 +413,22 @@ export default function TradeLogTable({
           {stats && (
             <div className="kpi-grid" style={{ marginBottom: 14 }}>
               <div className="kpi-card">
+                <div className="label">Capital</div>
+                <div className={`value ${stats.current_capital >= stats.capital_at_period_start ? "positive" : "negative"}`}>
+                  {fmtMoney(stats.current_capital)}
+                </div>
+                <div className="subvalue">
+                  Started {fmtMoney(stats.capital_at_period_start)}
+                  {stats.first_trade_date ? ` on ${fmtDateOnly(stats.first_trade_date)}` : ""}
+                </div>
+              </div>
+              <div className="kpi-card">
                 <div className="label">P &amp; L</div>
-                <div className={`value ${stats.grossPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.grossPnl)}</div>
+                <div className={`value ${stats.gross_pnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.gross_pnl)}</div>
               </div>
               <div className="kpi-card">
                 <div className="label">Net P &amp; L</div>
-                <div className={`value ${stats.netPnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.netPnl)}</div>
+                <div className={`value ${stats.net_pnl >= 0 ? "positive" : "negative"}`}>{fmtMoney(stats.net_pnl)}</div>
                 <div className="subvalue">{fmtMoney(stats.charges)} charges &amp; {fmtMoney(stats.tax)} tax</div>
               </div>
               <div className="kpi-card">
@@ -387,7 +437,7 @@ export default function TradeLogTable({
               </div>
               <div className="kpi-card">
                 <div className="label">Win rate</div>
-                <div className="value">{stats.winRate.toFixed(1)}%</div>
+                <div className="value">{stats.win_rate.toFixed(1)}%</div>
               </div>
             </div>
           )}
@@ -395,7 +445,7 @@ export default function TradeLogTable({
       )}
 
     <div className="panel">
-      {sorted.length === 0 ? (
+      {trades.length === 0 ? (
         <div className="empty-state">{isOpenView ? "No open trades yet" : "No trades match these filters"}</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
@@ -416,7 +466,7 @@ export default function TradeLogTable({
               </tr>
             </thead>
             <tbody>
-              {sorted.map((t) => {
+              {trades.map((t) => {
                 const pnl = pnlByTradeId[t.trade_id];
                 return (
                   <tr key={t.trade_id}>
@@ -430,6 +480,12 @@ export default function TradeLogTable({
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {showPeriodFilter && hasMore && (
+        <div ref={sentinelRef} className="text-dim" style={{ textAlign: "center", padding: 12, fontSize: 12 }}>
+          {loadingMore ? "Loading more…" : ""}
         </div>
       )}
 

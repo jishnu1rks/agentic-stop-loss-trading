@@ -10,6 +10,7 @@ import type {
   Quote,
   Recommendation,
   Trade,
+  TradeStats,
 } from "./types";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -75,8 +76,10 @@ export const api = {
   setAgentActive: (agentId: string, active: boolean) =>
     client.post<Agent>(`/agents/${agentId}/activate`, null, { params: { active } }).then((r) => r.data),
 
-  listTrades: (params?: Record<string, string | boolean | undefined>) =>
+  listTrades: (params?: Record<string, string | number | boolean | undefined>) =>
     client.get<Trade[]>("/trades", { params }).then((r) => r.data),
+  tradeStats: (params?: Record<string, string | boolean | undefined>) =>
+    client.get<TradeStats>("/trades/stats", { params }).then((r) => r.data),
   openPositionsPnl: () => client.get<Record<string, OpenPositionPnl>>("/trades/open/pnl").then((r) => r.data),
   placeManualTrade: (payload: ManualTradeInput) =>
     client.post<Trade>("/trades/manual", payload).then((r) => r.data),

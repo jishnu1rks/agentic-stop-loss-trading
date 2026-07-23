@@ -12,6 +12,28 @@ function byRecommendationFirst(a: Agent, b: Agent): number {
   return rank(a) - rank(b);
 }
 
+const LLM_STRATEGIES = ["llm_recommendation", "llm_recommendation_execution"];
+
+// These two notes are identical for every llm_recommendation/execution
+// agent - shown once here instead of repeated on every individual card.
+function LlmAgentsNote() {
+  return (
+    <div className="panel" style={{ marginBottom: 20 }}>
+      <div className="field-hint" style={{ marginBottom: 12 }}>
+        MVP limit: AI scans run at most once per hour, only between 11:00 AM-3:00 PM, to conserve API quota. Not yet
+        user-editable - will be made configurable later.
+      </div>
+      <div className="field-hint">
+        Eligibility filter: before reaching an agent (or the AI), every symbol from the live screener must clear a
+        fundamentals health/valuation check - hard-disqualified outright if Debt/Equity is 3x or more, or earnings
+        growth has collapsed below -50%. Otherwise it's scored on Debt/Equity, PEG, revenue/earnings growth, insider
+        holding %, and P/B (whichever of these are available), and must score at least 50% to pass. A symbol with no
+        fundamentals data at all is kept (treated as neutral) rather than excluded for a data gap.
+      </div>
+    </div>
+  );
+}
+
 export default function AgentSettingsPage({ refreshTick, onChanged }: { refreshTick: number; onChanged: () => void }) {
   const [agents, setAgents] = useState<Agent[]>([]);
 
@@ -32,6 +54,7 @@ export default function AgentSettingsPage({ refreshTick, onChanged }: { refreshT
       </div>
 
       <div className="section">
+        {agents.some((a) => LLM_STRATEGIES.includes(a.strategy)) && <LlmAgentsNote />}
         {agents.length === 0 ? (
           <div className="panel">
             <div className="empty-state">No agents configured yet</div>
