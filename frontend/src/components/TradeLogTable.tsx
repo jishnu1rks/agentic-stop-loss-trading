@@ -202,7 +202,7 @@ export default function TradeLogTable({
   };
 
   const afterEdit = () => {
-    load();
+    loadPage(true);
     onChanged?.();
   };
 
