@@ -53,7 +53,7 @@ class Trade(Base):
     trade_id = Column(String, primary_key=True, default=_uuid)
     agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
     # The Recommending agent whose signal led to this trade - only ever set
-    # for llm_recommendation_execution trades (see _find_recommend_only_agent
+    # for llm_recommendation_execution trades (see _find_recommend_only_agents
     # in agent_runtime.py); null for manual trades and every other strategy,
     # and null for trades placed before this column existed. Lets the trade
     # log show which Recommending agent actually flagged a stock, not just
@@ -110,7 +110,7 @@ class LlmSignalCache(Base):
     rolling hour, within an 11:00-15:00 IST window - see
     agent_runtime.get_or_scan_llm_signals. Keyed by the Recommending
     agent's own agent_id so an llm_recommendation_execution agent
-    mirroring that same prompt/universe (see _find_recommend_only_agent)
+    mirroring that same prompt/universe (see _find_recommend_only_agents)
     reuses this same cache entry instead of doubling API spend."""
 
     __tablename__ = "llm_signal_cache"

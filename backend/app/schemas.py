@@ -36,6 +36,11 @@ class ScreenerUniverseConfig(BaseModel):
     sort_by: Literal["dayvolume", "percentchange"] = "dayvolume"
     limit: int = Field(default=15, ge=1, le=50)
     min_market_cap: float = Field(default=5_000_000_000, gt=0)
+    # Used only if the live screener call itself fails (e.g. Yahoo's
+    # unofficial endpoint rate-limiting this host) - see
+    # agent_runtime.resolve_universe. None/empty means no safety net: a
+    # screener failure raises MarketDataUnavailableError as before.
+    fallback_watchlist: list[str] | None = None
 
 
 class AgentUniverseConfig(BaseModel):

@@ -13,6 +13,12 @@
   --green: #33c481;
   --red: #ef5a6f;
   --amber: #e6b95c;
+  /* Zerodha Kite convention: buy/sell direction is blue/orange, not
+     green/red - green/red is reserved for P&L sign so a stock's direction
+     and its profit/loss never read as the same signal. Used only for the
+     Open Trades direction pill (.pill.direction-buy/.direction-sell). */
+  --blue: #387ed1;
+  --orange: #ff9933;
   --input-bg: rgba(255, 255, 255, 0.06);
   --input-border: rgba(255, 255, 255, 0.22);
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -30,6 +36,8 @@
   --green: #1a9f66;
   --red: #d6394f;
   --amber: #b3760a;
+  --blue: #2563a8;
+  --orange: #cc7a1a;
   --input-bg: rgba(0, 0, 0, 0.04);
   --input-border: rgba(0, 0, 0, 0.25);
   color-scheme: light;
@@ -139,6 +147,7 @@ h1, h2, h3 {
   flex: 1;
   min-width: 0;
   max-width: 1400px;
+  margin: 0 auto;
   padding: 24px;
 }
 
@@ -266,6 +275,10 @@ tr:hover td {
 }
 .pill.buy { background: rgba(51, 196, 129, 0.15); color: var(--green); }
 .pill.sell { background: rgba(239, 90, 111, 0.15); color: var(--red); }
+/* Open Trades direction pill only (Zerodha Kite convention) - blue/orange
+   so direction never visually reads as the same signal as P&L sign. */
+.pill.direction-buy { background: rgba(56, 126, 209, 0.15); color: var(--blue); }
+.pill.direction-sell { background: rgba(255, 153, 51, 0.15); color: var(--orange); }
 .pill.open { background: rgba(230, 185, 92, 0.15); color: var(--amber); }
 .pill.closed { background: rgba(135, 145, 168, 0.15); color: var(--text-dim); }
 .pill.manual { background: var(--overlay-active); color: var(--text); }
@@ -520,6 +533,17 @@ tr:hover td {
   margin-left: auto;
 }
 
+.reco-agent-tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--overlay-active);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .reco-progress-track {
   height: 4px;
   border-radius: 2px;
@@ -721,6 +745,50 @@ tr:hover td {
 .mode-toggle button.active {
   background: var(--text);
   color: var(--bg);
+}
+
+.agent-active-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.agent-active-switch input {
+  display: none;
+}
+
+.agent-active-switch .switch-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--panel-border);
+  position: relative;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.agent-active-switch .switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.agent-active-switch input:checked + .switch-track {
+  background: var(--green);
+}
+
+.agent-active-switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+  background: #06231a;
 }
 
 .section-header-row {

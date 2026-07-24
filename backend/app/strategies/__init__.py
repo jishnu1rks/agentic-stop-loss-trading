@@ -10,7 +10,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     # Same scan() as llm_recommendation (it's universe/prompt-agnostic) -
     # registered separately so an agent can carry risk config and actually
     # trade on these signals while llm_recommendation itself stays
-    # recommend-only. See agent_runtime.run_agent_scan / _find_recommend_only_agent.
+    # recommend-only. See agent_runtime.run_agent_scan / _find_recommend_only_agents.
     "llm_recommendation_execution": LlmRecommendationStrategy,
 }
 

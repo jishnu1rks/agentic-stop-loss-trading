@@ -72,6 +72,10 @@ export interface ScreenerUniverseConfig {
   sort_by: "dayvolume" | "percentchange";
   limit: number;
   min_market_cap: number;
+  // Used only if the live screener call itself fails (e.g. Yahoo's
+  // unofficial endpoint rate-limiting this host) - see backend
+  // agent_runtime.resolve_universe. Empty/absent means no safety net.
+  fallback_watchlist?: string[] | null;
 }
 
 export interface AgentUniverseConfig {
@@ -150,6 +154,10 @@ export interface Recommendation {
   // _find_recommend_only_agent) - which Recommending agent a BUY/SELL
   // SIGNAL card traces back to.
   source_agent_name?: string | null;
+  // Backend-provided, llm_recommendation_execution cards only: true when
+  // the Execution agent's "pause new trades" switch is on - it won't
+  // auto-enter this signal (manual Buy still works).
+  agent_paused?: boolean;
   // watchlist_trigger fields
   entry_low?: number;
   entry_high?: number;

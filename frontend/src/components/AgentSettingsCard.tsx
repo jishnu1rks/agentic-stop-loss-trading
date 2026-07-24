@@ -4,9 +4,9 @@ import type { Agent, AgentRiskConfig, AgentScheduleConfig } from "../api/types";
 
 const STRATEGY_DESCRIPTIONS: Record<string, string> = {
   llm_recommendation:
-    "Pulls a live universe of trending NSE stocks (5 large-cap, 5 mid-cap, 5 small-cap, each pre-screened for financial health/valuation - see eligibility criteria below), sends their current price/volume snapshot to an AI model along with the trading prompt below, and asks it which symbols look worth buying or selling right now.",
+    "Tries a live screener first - 5 large-cap, 5 mid-cap, 5 small-cap trending NSE stocks, each pre-screened for financial health/valuation (see eligibility criteria below). Only if that live fetch fails does it fall back to the fixed watchlist below. Either way, it sends the resulting stocks' current price/volume snapshot to an AI model along with the trading prompt, and asks it which symbols look worth buying or selling right now.",
   llm_recommendation_execution:
-    "Mirrors the Recommending agent's AI-generated buy/sell signals (same prompt, same stocks), narrowed by the confidence/direction filters below - the Recommending agent only suggests, this one sizes, protects, and enters trades on the signals that pass those filters, using the risk settings below.",
+    "Aggregates AI-generated buy/sell signals from every active Recommending agent (not just one), narrowed by the confidence/direction filters below - the Recommending agents only suggest, this one sizes, protects, and enters trades on the signals that pass those filters, using the risk settings below. The switch below can pause new entries entirely while leaving existing positions' monitoring/exits untouched.",
   momentum_breakout:
     "Scans its configured stocks for names breaking out on strong price momentum and above-average volume, then automatically enters a trade the moment a breakout is confirmed.",
   watchlist_trigger:
@@ -48,25 +48,40 @@ export default function AgentSettingsCard({
 }) {
   const [risk, setRisk] = useState<AgentRiskConfig>(agent.config.risk ?? DEFAULT_RISK);
   const [schedule, setSchedule] = useState<AgentScheduleConfig>(agent.config.schedule);
+  const [name, setName] = useState(agent.name);
+  const [active, setActive] = useState(agent.active);
+  const [togglingActive, setTogglingActive] = useState(false);
   const isLlmRecommendation = agent.strategy === "llm_recommendation";
   const isExecutionAgent = agent.strategy === "llm_recommendation_execution";
   const [prompt, setPrompt] = useState(
     isLlmRecommendation ? String(agent.config.strategy_params.prompt ?? "") : ""
   );
 
-  // The Recommending agent this Execution agent mirrors (see backend's
-  // _find_recommend_only_agent) - looked up client-side from the already-
-  // fetched agent list purely for transparency (showing the user what
-  // prompt/universe this agent is actually acting on), not for saving.
-  const sourceAgent = isExecutionAgent
-    ? allAgents.find((a) => a.strategy === "llm_recommendation" && a.active && a.config.risk == null)
-    : undefined;
+  // Every active Recommending agent this Execution agent mirrors (see
+  // backend's _find_recommend_only_agents) - looked up client-side from the
+  // already-fetched agent list purely for transparency (showing which
+  // agents this one is actually acting on), not for saving. Aggregates all
+  // of them, not just one - inactive Recommending agents are excluded.
+  const sourceAgents = isExecutionAgent
+    ? allAgents.filter((a) => a.strategy === "llm_recommendation" && a.active)
+    : [];
+
+  const [fallbackWatchlist, setFallbackWatchlist] = useState(() =>
+    isLlmRecommendation ? (agent.config.universe.screener?.fallback_watchlist ?? []).join(", ") : ""
+  );
 
   const [minConfidencePct, setMinConfidencePct] = useState(() =>
     isExecutionAgent ? Number(agent.config.strategy_params.min_confidence_pct ?? 0) : 0
   );
   const [directionFilter, setDirectionFilter] = useState<ExecutionDirectionFilter>(() =>
     isExecutionAgent ? ((agent.config.strategy_params.directions as ExecutionDirectionFilter) ?? "both") : "both"
+  );
+  // Separate from the Active/Paused switch above (which stops this agent's
+  // scans entirely, including monitoring): pausing new trades only blocks
+  // fresh entries - existing open positions keep getting watched and their
+  // stop-loss/target GTTs still fire normally (see run_agent_scan).
+  const [pauseNewTrades, setPauseNewTrades] = useState(() =>
+    isExecutionAgent ? Boolean(agent.config.strategy_params.pause_new_trades) : false
   );
 
   const [saving, setSaving] = useState(false);
@@ -76,6 +91,24 @@ export default function AgentSettingsCard({
   const setRiskField = <K extends keyof AgentRiskConfig>(key: K, value: AgentRiskConfig[K]) =>
     setRisk((prev) => ({ ...prev, [key]: value }));
 
+  // Takes effect immediately (not gated behind Save changes) - a switch is
+  // expected to act like a switch. Pausing an agent stops its scheduled
+  // scans (see app.scheduler.schedule_agent) until switched back on.
+  const toggleActive = async () => {
+    const next = !active;
+    setTogglingActive(true);
+    try {
+      await api.setAgentActive(agent.agent_id, next);
+      setActive(next);
+      onSaved();
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail ?? "Failed to update active state");
+    } finally {
+      setTogglingActive(false);
+    }
+  };
+
   // Stop-loss/target are always % of entry price (CMP at fill time), never
   // a currency amount - 0.1-5% keeps a fat-fingered config from arming a
   // trade with, say, a 50% stop-loss. Mirrors the backend's AgentRiskConfig
@@ -84,6 +117,9 @@ export default function AgentSettingsCard({
   const PCT_MAX = 5;
 
   const validate = (): string | null => {
+    if (!name.trim()) {
+      return "Agent name is required.";
+    }
     if (isLlmRecommendation) {
       return !prompt.trim() ? "Prompt is required for a recommendation agent." : null;
     }
@@ -119,16 +155,33 @@ export default function AgentSettingsCard({
     try {
       await api.updateAgent(agent.agent_id, {
         agent_id: agent.agent_id,
-        name: agent.name,
-        // Agents are always active - trading happens on its own schedule
-        // during market hours, with no manual on/off switch in this UI.
-        active: true,
-        universe: agent.config.universe,
+        name: name.trim(),
+        active,
+        universe: isLlmRecommendation
+          ? {
+              type: "screener",
+              value: null,
+              screener: {
+                sort_by: agent.config.universe.screener?.sort_by ?? "dayvolume",
+                limit: agent.config.universe.screener?.limit ?? 15,
+                min_market_cap: agent.config.universe.screener?.min_market_cap ?? 5_000_000_000,
+                fallback_watchlist: fallbackWatchlist
+                  .split(",")
+                  .map((s) => s.trim().toUpperCase())
+                  .filter(Boolean),
+              },
+            }
+          : agent.config.universe,
         strategy: agent.strategy,
         strategy_params: isLlmRecommendation
           ? { ...agent.config.strategy_params, prompt }
           : isExecutionAgent
-            ? { ...agent.config.strategy_params, min_confidence_pct: minConfidencePct, directions: directionFilter }
+            ? {
+                ...agent.config.strategy_params,
+                min_confidence_pct: minConfidencePct,
+                directions: directionFilter,
+                pause_new_trades: pauseNewTrades,
+              }
             : agent.config.strategy_params,
         risk: isLlmRecommendation ? null : risk,
         schedule: { ...schedule, market_hours_only: true },
@@ -148,12 +201,28 @@ export default function AgentSettingsCard({
   return (
     <div className="panel" style={{ marginBottom: 20 }}>
       <div className="panel-header">
-        <div>
-          <strong>{agent.name}</strong>
-          {/* <div className="text-dim" style={{ fontSize: 12, marginTop: 2 }}>
-            {agent.agent_id} · {agent.strategy} · {universeSummary}
-          </div> */}
-        </div>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{
+            background: "transparent",
+            border: "none",
+            font: "inherit",
+            fontWeight: 700,
+            fontSize: 16,
+            color: "var(--text)",
+            padding: 0,
+            minWidth: 0,
+            flex: 1,
+          }}
+        />
+        <label className="agent-active-switch" title={active ? "Agent is active - click to pause" : "Agent is paused - click to resume"}>
+          <input type="checkbox" checked={active} disabled={togglingActive} onChange={toggleActive} />
+          <span className="switch-track">
+            <span className="switch-thumb" />
+          </span>
+          {active ? "Active" : "Paused"}
+        </label>
       </div>
 
       <div className="agent-description">{strategyDescription(agent.strategy)}</div>
@@ -171,27 +240,61 @@ export default function AgentSettingsCard({
             placeholder="Describe the entry criteria this agent should look for, e.g. 'Buy NSE large-caps that dropped more than 3% today on above-average volume with no negative news.'"
           />
           <span className="field-hint">
-            Sent to the model on every scan alongside a live price/volume snapshot of this agent's configured stocks.
+            Sent to the model alongside a live price/volume snapshot of the live-screened stocks below (or the
+            fallback watchlist, if the live screener fails) - subject to the once-per-hour/11:00-15:00 limit above.
+          </span>
+        </div>
+      )}
+
+      {isLlmRecommendation && (
+        <div className="form-field" style={{ marginBottom: 16 }}>
+          <label>Fallback watchlist</label>
+          <input
+            type="text"
+            style={{ width: "100%" }}
+            value={fallbackWatchlist}
+            onChange={(e) => setFallbackWatchlist(e.target.value)}
+            placeholder="e.g. RELIANCE, TCS, INFY"
+          />
+          <span className="field-hint">
+            Comma-separated symbols used only if the live screener fails - not the primary source, a safety net.
+            Leave blank for no fallback (a screener failure then pauses this agent's scan instead).
           </span>
         </div>
       )}
 
       {isExecutionAgent && (
         <div className="form-field" style={{ marginBottom: 16 }}>
-          <label>Prompt this agent is acting on</label>
-          <textarea
-            rows={4}
-            readOnly
-            style={{ width: "100%", fontFamily: "inherit", opacity: 0.75 }}
-            value={
-              sourceAgent
-                ? String(sourceAgent.config.strategy_params.prompt ?? "")
-                : "No active Recommending agent found to mirror - this agent won't produce any signals."
-            }
-          />
+          <label>Recommending agents this agent is mirroring</label>
+          {sourceAgents.length === 0 ? (
+            <div className="field-hint">
+              No active Recommending agent right now - this agent won't produce any signals until one is active.
+            </div>
+          ) : (
+            <div className="field-hint">
+              {sourceAgents.map((a) => a.name).join(", ")} - edit each one's own prompt on its own card above; an
+              inactive Recommending agent is automatically excluded here.
+            </div>
+          )}
+        </div>
+      )}
+
+      {isExecutionAgent && (
+        <div className="form-field" style={{ marginBottom: 16 }}>
+          <label className="agent-active-switch" title="Blocks only new entries - existing open positions keep being monitored and exit normally">
+            <input
+              type="checkbox"
+              checked={pauseNewTrades}
+              onChange={(e) => setPauseNewTrades(e.target.checked)}
+            />
+            <span className="switch-track">
+              <span className="switch-thumb" />
+            </span>
+            {pauseNewTrades ? "New trades paused" : "New trades enabled"}
+          </label>
           <span className="field-hint">
-            Mirrored exactly from the Recommending agent ({sourceAgent?.name ?? "none configured"}) - edit it there,
-            not here.
+            Stops this agent from opening any new position - open positions are still watched and their stop-loss/
+            target still fire normally. Takes effect on Save changes.
           </span>
         </div>
       )}

@@ -3,7 +3,6 @@ import { api } from "../api/client";
 import type { Agent, OpenPositionPnl, Trade, TradeStats } from "../api/types";
 import Modal from "./Modal";
 import EditProtectionModal from "./EditProtectionModal";
-import ChargesBreakdownModal from "./ChargesBreakdownModal";
 import TradeDetailsModal from "./TradeDetailsModal";
 
 type SortKey = keyof Trade;
@@ -60,10 +59,6 @@ export default function TradeLogTable({
   const [closingId, setClosingId] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<Trade | null>(null);
   const [editTrade, setEditTrade] = useState<Trade | null>(null);
-  // Two distinct popups, each with its own state so they never bleed into
-  // each other: the charges & tax breakdown (History's Charges column) and
-  // the full trade-details breakdown (either view's P&L column).
-  const [chargesTrade, setChargesTrade] = useState<Trade | null>(null);
   const [detailsTrade, setDetailsTrade] = useState<Trade | null>(null);
 
   const isOpenView = lockedStatus === "open";
@@ -73,6 +68,15 @@ export default function TradeLogTable({
   // still computes the correct next offset - see the observer effect below.
   const tradesRef = useRef<Trade[]>(trades);
   tradesRef.current = trades;
+  // Guards against out-of-order responses: switching period/sort/filters
+  // fires a new reset load before the previous one may have resolved - if
+  // the older request's response lands after the newer one's, it would
+  // otherwise overwrite the correct data with stale results (the "filters
+  // don't work properly" symptom). Every reset bumps this; a load-more
+  // captures the current value and is discarded if a reset supersedes it
+  // before it resolves.
+  const resetSeqRef = useRef(0);
+  const statsSeqRef = useRef(0);
 
   const filterParams = (): Record<string, string | number | boolean | undefined> => {
     const params: Record<string, string | number | boolean | undefined> = {
@@ -97,15 +101,17 @@ export default function TradeLogTable({
       params.limit = PAGE_SIZE;
       params.offset = offset;
     }
+    const mySeq = reset ? ++resetSeqRef.current : resetSeqRef.current;
     if (!reset) setLoadingMore(true);
     api
       .listTrades(params)
       .then((page) => {
+        if (mySeq !== resetSeqRef.current) return; // superseded by a newer reset
         setTrades((prev) => (reset ? page : [...prev, ...page]));
         setHasMore(showPeriodFilter ? page.length === PAGE_SIZE : false);
       })
       .catch(() => {
-        if (reset) setTrades([]);
+        if (reset && mySeq === resetSeqRef.current) setTrades([]);
       })
       .finally(() => setLoadingMore(false));
   };
@@ -125,7 +131,15 @@ export default function TradeLogTable({
     if (!showPeriodFilter) return;
     const params: Record<string, string | boolean | undefined> = { period };
     if (statusFilter) params.status = statusFilter;
-    api.tradeStats(params).then(setStats).catch(() => setStats(null));
+    const mySeq = ++statsSeqRef.current;
+    api
+      .tradeStats(params)
+      .then((s) => {
+        if (mySeq === statsSeqRef.current) setStats(s);
+      })
+      .catch(() => {
+        if (mySeq === statsSeqRef.current) setStats(null);
+      });
   }, [showPeriodFilter, statusFilter, period]);
 
   // Scroll-triggered "load more": watches a sentinel element rendered just
@@ -256,7 +270,7 @@ export default function TradeLogTable({
       id: "direction",
       label: "",
       sortKey: "direction",
-      cell: (t) => <span className={`pill ${t.direction}`}>{t.direction}</span>,
+      cell: (t) => <span className={`pill direction-${t.direction}`}>{t.direction}</span>,
     },
     qty: { id: "qty", label: "Qty", sortKey: "quantity", cell: (t) => t.quantity },
     buyPrice: {
@@ -281,6 +295,7 @@ export default function TradeLogTable({
           value
         );
       },
+      cellClassName: (t) => (t.stop_loss_price ? "text-red" : ""),
     },
     target: {
       id: "target",
@@ -299,6 +314,7 @@ export default function TradeLogTable({
           value
         );
       },
+      cellClassName: (t) => (t.target_price != null ? "text-green" : ""),
     },
     buyDate: {
       id: "buy_date",
@@ -331,19 +347,6 @@ export default function TradeLogTable({
     // really "net" vs "gross" - there's no exit charge/tax yet to net out),
     // just relabeled and left uncolored since CMP carries the color there now.
     openPnl: { id: "open_pnl", label: "P & L", sortKey: "net_profit", cell: netPnlCell },
-    charges: {
-      id: "charges",
-      label: "Charges",
-      sortKey: "charges",
-      cell: (t) =>
-        t.charges != null ? (
-          <button className="editable-cell" title="Click to view charges & tax breakdown" onClick={() => setChargesTrade(t)}>
-            {t.charges.toFixed(2)}
-          </button>
-        ) : (
-          "—"
-        ),
-    },
     mode: {
       id: "mode",
       label: "Agent",
@@ -391,7 +394,6 @@ export default function TradeLogTable({
         cols.stock,
         cols.investmentAmount,
         cols.profitLoss,
-        cols.charges,
         cols.netPnl,
         cols.buyDate,
         cols.sellDate,
@@ -520,8 +522,6 @@ export default function TradeLogTable({
           onSaved={afterEdit}
         />
       )}
-
-      {chargesTrade && <ChargesBreakdownModal trade={chargesTrade} onClose={() => setChargesTrade(null)} />}
 
       {detailsTrade && (
         <TradeDetailsModal

@@ -116,9 +116,9 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
             <div className="reco-timestamp">
               {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
               {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
-              {reco.agentName && ` · ${reco.agentName}`}
             </div>
           </div>
+          {reco.agentName && <span className="reco-agent-tag">{reco.agentName}</span>}
           <span className={`pill ${reco.direction === "sell" ? "sell" : "buy"}`}>
             {reco.direction === "sell" ? "SELL IDEA" : "BUY IDEA"}
           </span>
@@ -192,9 +192,9 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
           <div className="reco-timestamp">
             {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
             {reco.cap_size && ` · ${CAP_SIZE_LABELS[reco.cap_size]}`}
-            {isLlmSignal && reco.source_agent_name && ` · via ${reco.source_agent_name}`}
           </div>
         </div>
+        {isLlmSignal && reco.source_agent_name && <span className="reco-agent-tag">{reco.source_agent_name}</span>}
         <span
           className={`pill ${isLlmSignal ? (reco.direction === "sell" ? "sell" : "buy") : confirmed ? "buy" : "open"}`}
         >
@@ -252,6 +252,9 @@ function RecommendationCard({ reco, onBought }: { reco: Recommendation; onBought
 
       <div className="reco-rationale">{reco.rationale}</div>
       {reco.already_open && <div className="reco-open-badge">● Position already open for this symbol</div>}
+      {isLlmSignal && reco.agent_paused && (
+        <div className="reco-open-badge">⏸ New trades paused for this agent - won't auto-enter</div>
+      )}
       {error && <div className="reco-rationale text-red">{error}</div>}
 
       <button
@@ -326,7 +329,14 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
     (r) => !(r.strategy === "llm_recommendation" && executionSymbols.has(r.symbol)),
   );
 
-  const filteredRecos = capFilter === "all" ? dedupedRecos : dedupedRecos.filter((r) => r.cap_size === capFilter);
+  const matchesCap = (r: Recommendation, cap: CapFilter) => cap === "all" || r.cap_size === cap;
+
+  const capFilterOptions = CAP_FILTER_OPTIONS.map((opt) => ({
+    ...opt,
+    count: dedupedRecos.filter((r) => matchesCap(r, opt.value)).length,
+  }));
+
+  const filteredRecos = dedupedRecos.filter((r) => matchesCap(r, capFilter));
   const confirmedCount = filteredRecos.filter((r) => r.in_signal).length;
 
   return (
@@ -355,14 +365,14 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
       ) : (
         <>
           <div className="cap-filter-tabs" style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            {CAP_FILTER_OPTIONS.map((opt) => (
+            {capFilterOptions.map((opt) => (
               <button
                 key={opt.value}
                 className={`btn ${capFilter === opt.value ? "btn-buy" : ""}`}
                 style={{ padding: "4px 12px", fontSize: 12 }}
                 onClick={() => setCapFilter(opt.value)}
               >
-                {opt.label}
+                {opt.label} ({opt.count})
               </button>
             ))}
           </div>

@@ -124,26 +124,38 @@ def resolve_universe(config: dict, market_data_adapter) -> list[str]:
     "watchlist"/"index" are just a stored list; "screener" (Section 5.1)
     instead defers to the market data adapter's live top-N discovery, so the
     universe is today's most-active/biggest-movers rather than a
-    hand-maintained list. May raise MarketDataUnavailableError - callers
-    already treat that as a fail-safe pause for get_snapshot, so it's raised
-    here rather than swallowed."""
+    hand-maintained list.
+
+    A screener fetch always tries the live call first. If it fails (e.g.
+    Yahoo's unofficial screener endpoint rate-limiting this host) and a
+    screener.fallback_watchlist is configured, that fixed list is used
+    instead rather than pausing the agent entirely - a safety net, not the
+    primary path. With no fallback configured, the failure is re-raised as
+    MarketDataUnavailableError same as before - callers already treat that
+    as a fail-safe pause for get_snapshot."""
     universe_cfg = config["universe"]
     if universe_cfg.get("type") == "screener":
         screener = universe_cfg.get("screener") or {}
-        if config.get("strategy") == "llm_recommendation":
-            # MVP: the Recommending agent always gets a fixed 5 large/5
-            # mid/5 small-cap spread rather than one flat top-N-by-volume
-            # list, which otherwise skews almost entirely large-cap.
-            trending = market_data_adapter.get_tiered_trending_symbols(
-                large_count=5, mid_count=5, small_count=5,
-                sort_by=screener.get("sort_by", "dayvolume"),
-            )
-        else:
-            trending = market_data_adapter.get_trending_symbols(
-                sort_by=screener.get("sort_by", "dayvolume"),
-                limit=screener.get("limit", 15),
-                min_market_cap=screener.get("min_market_cap", 5_000_000_000),
-            )
+        try:
+            if config.get("strategy") == "llm_recommendation":
+                # MVP: the Recommending agent always gets a fixed 5 large/5
+                # mid/5 small-cap spread rather than one flat top-N-by-volume
+                # list, which otherwise skews almost entirely large-cap.
+                trending = market_data_adapter.get_tiered_trending_symbols(
+                    large_count=5, mid_count=5, small_count=5,
+                    sort_by=screener.get("sort_by", "dayvolume"),
+                )
+            else:
+                trending = market_data_adapter.get_trending_symbols(
+                    sort_by=screener.get("sort_by", "dayvolume"),
+                    limit=screener.get("limit", 15),
+                    min_market_cap=screener.get("min_market_cap", 5_000_000_000),
+                )
+        except MarketDataUnavailableError:
+            fallback = screener.get("fallback_watchlist")
+            if not fallback:
+                raise
+            trending = fallback
         return filter_recommendable(trending, market_data_adapter)
     value = universe_cfg["value"]
     return value if isinstance(value, list) else [value]
@@ -218,8 +230,9 @@ def get_or_scan_llm_signals(
 
     cache_key is always the Recommending agent's own agent_id, even when
     called on behalf of an llm_recommendation_execution agent mirroring
-    its prompt/universe (see _find_recommend_only_agent) - the two share
-    one cache entry rather than each spending their own quota.
+    its prompt/universe (see _find_recommend_only_agents) - Execution and
+    Recommending agents share one cache entry per Recommending agent rather
+    than each spending their own quota.
 
     force=True bypasses both the 1-hour interval and the 11:00-15:00
     window entirely - a manual, human-initiated override for testing (see
@@ -571,16 +584,14 @@ def build_llm_recommendations(db: Session, agent: Agent, force: bool = False) ->
     return recommendations
 
 
-def _find_recommend_only_agent(db: Session) -> Agent | None:
-    """The Recommending agent (Section 5.2) that llm_recommendation_execution
-    agents mirror the prompt/universe of - identified as the active
-    llm_recommendation-strategy agent with no risk config, i.e. the one that
-    only ever produces ideas, never trades itself."""
-    candidates = db.query(Agent).filter(Agent.strategy == "llm_recommendation", Agent.active == True).all()  # noqa: E712
-    for candidate in candidates:
-        if candidate.config.get("risk") is None:
-            return candidate
-    return None
+def _find_recommend_only_agents(db: Session) -> list[Agent]:
+    """Every active Recommending agent (Section 5.2) an
+    llm_recommendation_execution agent mirrors - not just one: an Execution
+    agent aggregates signals from all of them, excluding only inactive ones.
+    (Every llm_recommendation-strategy agent structurally has risk=None,
+    enforced by AgentConfigIn._check_risk_required_for_trading_strategies,
+    so filtering on that would be redundant here.)"""
+    return db.query(Agent).filter(Agent.strategy == "llm_recommendation", Agent.active == True).all()  # noqa: E712
 
 
 def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> list[Signal]:
@@ -600,66 +611,75 @@ def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> l
 
 def build_llm_execution_recommendations(db: Session, agent: Agent, force: bool = False) -> list[dict]:
     """Live trade-idea cards for an llm_recommendation_execution agent (an
-    Execution agent that trades off the Recommending agent's own LLM
-    signals instead of fixed bands/breakouts): mirrors the Recommending
-    agent's prompt/universe exactly (see _find_recommend_only_agent), but
-    prices target/stop-loss/qty from THIS agent's own risk config, since
-    it's the one that actually enters trades on these signals (see
-    run_agent_scan)."""
+    Execution agent that trades off every active Recommending agent's own
+    LLM signals instead of fixed bands/breakouts - see
+    _find_recommend_only_agents), pricing target/stop-loss/qty from THIS
+    agent's own risk config, since it's the one that actually enters trades
+    on these signals (see run_agent_scan). If two Recommending agents both
+    flag the same symbol, both show up as separate cards - each is an
+    independent AI opinion, not a duplicate."""
     market_data_adapter = get_market_data_adapter()
-    source_agent = _find_recommend_only_agent(db)
-    if source_agent is None:
+    source_agents = _find_recommend_only_agents(db)
+    if not source_agents:
         return []
 
-    source_config = source_agent.config
     risk = agent.config["risk"]
     open_symbols = _open_symbols(db, agent.agent_id)
     budget = trade_budget(risk, get_capital_summary(db)["free_capital"], _capital_committed_today(db, agent.agent_id))
-
-    _universe, snapshot, signals = get_or_scan_llm_signals(
-        db, source_agent.agent_id, source_config, market_data_adapter, force=force
-    )
-    signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
+    agent_paused = bool(agent.config.get("strategy_params", {}).get("pause_new_trades"))
 
     recommendations = []
-    for signal in signals:
-        price = snapshot.prices.get(signal.symbol)
-        if price is None:
-            continue
-
-        history = snapshot.history.get(signal.symbol)
-        prior_high = round(max(history[:-1]), 2) if history and len(history) >= 2 else None
-        breakout_pct = round((price - prior_high) / prior_high * 100, 2) if prior_high else None
-
-        sl_pct = risk["buy_stop_loss_pct"] if signal.direction == "buy" else risk["sell_stop_loss_pct"]
-        sl_price = stop_loss_price(signal.direction, price, sl_pct)
-        tp_price = target_price(signal.direction, price, risk["target_pct"]) if risk.get("target_pct") else None
-        upside_pct = None
-        if tp_price is not None:
-            upside_pct = round(
-                (tp_price - price) / price * 100 if signal.direction == "buy" else (price - tp_price) / price * 100, 2
+    for source_agent in source_agents:
+        try:
+            _universe, snapshot, signals = get_or_scan_llm_signals(
+                db, source_agent.agent_id, source_agent.config, market_data_adapter, force=force
             )
+        except MarketDataUnavailableError:
+            continue
+        signals = _filter_execution_signals(signals, agent.config.get("strategy_params", {}))
 
-        recommendations.append(
-            {
-                "symbol": signal.symbol,
-                "unavailable": False,
-                "direction": signal.direction,
-                "cmp": price,
-                "prior_high": prior_high,
-                "breakout_pct": breakout_pct,
-                "stop_loss_price": sl_price,
-                "target_price": tp_price,
-                "upside_pct": upside_pct,
-                "quantity": position_size(budget, price),
-                "in_signal": True,
-                "proximity_pct": round(min(100.0, max(0.0, signal.confidence * 100)), 1),
-                "already_open": signal.symbol in open_symbols,
-                "rationale": signal.reason,
-                "cap_size": _cap_size_for(signal.symbol, market_data_adapter),
-                "source_agent_name": source_agent.name,
-            }
-        )
+        for signal in signals:
+            price = snapshot.prices.get(signal.symbol)
+            if price is None:
+                continue
+
+            history = snapshot.history.get(signal.symbol)
+            prior_high = round(max(history[:-1]), 2) if history and len(history) >= 2 else None
+            breakout_pct = round((price - prior_high) / prior_high * 100, 2) if prior_high else None
+
+            sl_pct = risk["buy_stop_loss_pct"] if signal.direction == "buy" else risk["sell_stop_loss_pct"]
+            sl_price = stop_loss_price(signal.direction, price, sl_pct)
+            tp_price = target_price(signal.direction, price, risk["target_pct"]) if risk.get("target_pct") else None
+            upside_pct = None
+            if tp_price is not None:
+                upside_pct = round(
+                    (tp_price - price) / price * 100
+                    if signal.direction == "buy"
+                    else (price - tp_price) / price * 100,
+                    2,
+                )
+
+            recommendations.append(
+                {
+                    "symbol": signal.symbol,
+                    "unavailable": False,
+                    "direction": signal.direction,
+                    "cmp": price,
+                    "prior_high": prior_high,
+                    "breakout_pct": breakout_pct,
+                    "stop_loss_price": sl_price,
+                    "target_price": tp_price,
+                    "upside_pct": upside_pct,
+                    "quantity": position_size(budget, price),
+                    "in_signal": True,
+                    "proximity_pct": round(min(100.0, max(0.0, signal.confidence * 100)), 1),
+                    "already_open": signal.symbol in open_symbols,
+                    "rationale": signal.reason,
+                    "cap_size": _cap_size_for(signal.symbol, market_data_adapter),
+                    "source_agent_name": source_agent.name,
+                    "agent_paused": agent_paused,
+                }
+            )
     return recommendations
 
 
@@ -874,10 +894,9 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     Recommending agent) stop after Signal: they carry no risk config to size
     or protect a position with, by design - placing trades is the Execution
     agent's job, not theirs. An llm_recommendation_execution agent (the
-    Execution agent) does that job: it mirrors the Recommending agent's own
-    universe/prompt exactly rather than scanning its own (see
-    _find_recommend_only_agent), then sizes/enters trades on those same
-    signals using its own risk config below, same as any other strategy."""
+    Execution agent) does that job, but aggregates every active Recommending
+    agent's signals rather than scanning a universe of its own - see
+    _run_execution_agent_scan."""
     if not agent.active:
         return
 
@@ -890,37 +909,27 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         db.commit()
         return
 
-    scan_config = config
-    llm_cache_key = agent.agent_id
     if agent.strategy == "llm_recommendation_execution":
-        source_agent = _find_recommend_only_agent(db)
-        if source_agent is None:
-            _log(db, agent.agent_id, None, "paused", "no Recommending agent configured to mirror")
-            db.commit()
-            return
-        scan_config = source_agent.config
-        llm_cache_key = source_agent.agent_id
+        _run_execution_agent_scan(db, agent, config, market_data_adapter)
+        return
 
     try:
-        if agent.strategy in ("llm_recommendation", "llm_recommendation_execution"):
+        if agent.strategy == "llm_recommendation":
             # Throttled: at most 1 real universe-resolve + LLM call per
             # rolling hour, only 11:00-15:00 IST - see get_or_scan_llm_signals.
-            universe, snapshot, signals = get_or_scan_llm_signals(db, llm_cache_key, scan_config, market_data_adapter)
+            universe, snapshot, signals = get_or_scan_llm_signals(db, agent.agent_id, config, market_data_adapter)
         else:
-            universe = resolve_universe(scan_config, market_data_adapter)
+            universe = resolve_universe(config, market_data_adapter)
             snapshot = market_data_adapter.get_snapshot(
-                universe, lookback_days=scan_config.get("strategy_params", {}).get("lookback_days", 20)
+                universe, lookback_days=config.get("strategy_params", {}).get("lookback_days", 20)
             )
             strategy = get_strategy(agent.strategy)
-            signals = strategy.scan(universe, snapshot, scan_config.get("strategy_params", {}))
+            signals = strategy.scan(universe, snapshot, config.get("strategy_params", {}))
     except MarketDataUnavailableError as exc:
         # Section 9 fail-safe: pause rather than act on stale/missing data.
         _log(db, agent.agent_id, None, "paused", f"market data unavailable: {exc}")
         db.commit()
         return
-
-    if agent.strategy == "llm_recommendation_execution":
-        signals = _filter_execution_signals(signals, config.get("strategy_params", {}))
 
     signalled_symbols = {s.symbol for s in signals}
     for symbol in universe:
@@ -968,7 +977,6 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
         enter_position(
             db,
             agent_id=agent.agent_id,
-            source_agent_id=llm_cache_key if agent.strategy == "llm_recommendation_execution" else None,
             symbol=signal.symbol,
             direction=signal.direction,
             quantity=qty,
@@ -991,6 +999,100 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     # (most scans find nothing to buy). Without this, the entire scan
     # decision log for a no-op cycle silently vanished when the session
     # closed.
+    db.commit()
+
+
+def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_data_adapter) -> None:
+    """The llm_recommendation_execution branch of run_agent_scan: aggregates
+    signals from every active Recommending agent (_find_recommend_only_agents)
+    instead of scanning one universe of its own - each source keeps its own
+    independent LLM cache/throttle (get_or_scan_llm_signals), so this adds
+    no new API calls beyond what each Recommending agent already makes on
+    its own. If two sources both flag the same symbol, whichever is
+    processed first enters and the second is skipped as "already holding a
+    position" via the same open_symbols check used for every other signal."""
+    source_agents = _find_recommend_only_agents(db)
+    if not source_agents:
+        _log(db, agent.agent_id, None, "paused", "no active Recommending agent to mirror")
+        db.commit()
+        return
+
+    if config.get("strategy_params", {}).get("pause_new_trades"):
+        # Manual "pause new trades" switch (AgentSettingsCard) - blocks only
+        # new entries; monitor_open_positions runs on its own schedule
+        # independent of this function, so existing positions' stop-loss/
+        # target GTTs keep firing normally while paused.
+        _log(db, agent.agent_id, None, "skipped", "new trades paused for this agent")
+        db.commit()
+        return
+
+    combined: list[tuple[Agent, Signal, float]] = []
+    for source_agent in source_agents:
+        try:
+            universe, snapshot, signals = get_or_scan_llm_signals(
+                db, source_agent.agent_id, source_agent.config, market_data_adapter
+            )
+        except MarketDataUnavailableError as exc:
+            _log(db, agent.agent_id, None, "paused", f"market data unavailable for {source_agent.name}: {exc}")
+            continue
+
+        filtered = _filter_execution_signals(signals, config.get("strategy_params", {}))
+        filtered_symbols = {s.symbol for s in filtered}
+        for symbol in universe:
+            if symbol not in filtered_symbols:
+                _log(db, agent.agent_id, symbol, "no_signal", f"no entry criteria met (via {source_agent.name})")
+
+        for signal in filtered:
+            price = snapshot.prices.get(signal.symbol)
+            if price is not None:
+                combined.append((source_agent, signal, price))
+
+    if not combined:
+        db.commit()
+        return
+
+    risk = config["risk"]
+    open_symbols = _open_symbols(db, agent.agent_id)
+    open_count = _open_position_count(db, agent.agent_id)
+    capital_used = _capital_committed_today(db, agent.agent_id)
+    free_capital = get_capital_summary(db)["free_capital"]
+
+    for source_agent, signal, price in combined:
+        if signal.symbol in open_symbols:
+            _log(db, agent.agent_id, signal.symbol, "skipped", "already holding a position")
+            continue
+        if open_count >= risk["max_concurrent_positions"]:
+            _log(db, agent.agent_id, signal.symbol, "skipped", "max_concurrent_positions reached")
+            continue
+
+        budget = trade_budget(risk, free_capital, capital_used)
+        qty = position_size(budget, price)
+        if qty <= 0:
+            _log(db, agent.agent_id, signal.symbol, "skipped", "insufficient capital for even 1 share")
+            continue
+
+        trade_value = qty * price
+
+        enter_position(
+            db,
+            agent_id=agent.agent_id,
+            source_agent_id=source_agent.agent_id,
+            symbol=signal.symbol,
+            direction=signal.direction,
+            quantity=qty,
+            ref_price=price,
+            buy_stop_loss_pct=risk.get("buy_stop_loss_pct"),
+            sell_stop_loss_pct=risk.get("sell_stop_loss_pct"),
+            target_pct=risk.get("target_pct"),
+        )
+        _log(db, agent.agent_id, signal.symbol, "entered", signal.reason)
+        db.commit()
+
+        open_count += 1
+        capital_used += trade_value
+        free_capital -= trade_value
+        open_symbols.add(signal.symbol)
+
     db.commit()
 
 

@@ -4,14 +4,6 @@ import type { Agent } from "../api/types";
 import AgentSettingsCard from "../components/AgentSettingsCard";
 import AgentStatusLegend from "../components/AgentStatusLegend";
 
-// Recommendation agents (llm_recommendation) only ever suggest ideas - they
-// read most naturally as the "front page" of this list, ahead of agents that
-// actually place trades.
-function byRecommendationFirst(a: Agent, b: Agent): number {
-  const rank = (agent: Agent) => (agent.strategy === "llm_recommendation" ? 0 : 1);
-  return rank(a) - rank(b);
-}
-
 const LLM_STRATEGIES = ["llm_recommendation", "llm_recommendation_execution"];
 
 // These two notes are identical for every llm_recommendation/execution
@@ -60,21 +52,38 @@ export default function AgentSettingsPage({ refreshTick, onChanged }: { refreshT
             <div className="empty-state">No agents configured yet</div>
           </div>
         ) : (
-          <div className="agent-grid">
-            {[...agents]
-              .sort(byRecommendationFirst)
-              .map((a) => (
-                <AgentSettingsCard
-                  key={a.agent_id}
-                  agent={a}
-                  allAgents={agents}
-                  onSaved={() => {
-                    load();
-                    onChanged();
-                  }}
-                />
-              ))}
-          </div>
+          <>
+            <div className="agent-grid">
+              {agents
+                .filter((a) => a.strategy === "llm_recommendation")
+                .map((a) => (
+                  <AgentSettingsCard
+                    key={a.agent_id}
+                    agent={a}
+                    allAgents={agents}
+                    onSaved={() => {
+                      load();
+                      onChanged();
+                    }}
+                  />
+                ))}
+            </div>
+            <div className="agent-grid" style={{ marginTop: 16 }}>
+              {agents
+                .filter((a) => a.strategy !== "llm_recommendation")
+                .map((a) => (
+                  <AgentSettingsCard
+                    key={a.agent_id}
+                    agent={a}
+                    allAgents={agents}
+                    onSaved={() => {
+                      load();
+                      onChanged();
+                    }}
+                  />
+                ))}
+            </div>
+          </>
         )}
       </div>
     </>
