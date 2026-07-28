@@ -40,6 +40,7 @@ _MISSING_COLUMNS: list[tuple[str, str, str]] = [
     ("trades", "source_agent_id", "VARCHAR"),
     ("llm_signal_cache", "last_attempted_at", "DATETIME"),
     ("llm_signal_cache", "last_error", "TEXT"),
+    ("trades", "signal_scanned_at", "DATETIME"),
 ]
 
 

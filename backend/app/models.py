@@ -101,6 +101,16 @@ class Trade(Base):
     created_at = Column(DateTime(timezone=True), default=_now)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 
+    # The scanned_at of the LlmSignalCache row that produced the signal this
+    # trade entered on - only ever set for llm_recommendation_execution
+    # trades (see enter_position/_run_execution_agent_scan). Lets a later
+    # scan tell "this is the same stale signal I already acted on" apart
+    # from "the source agent has genuinely rescanned since" - without it,
+    # a symbol whose position just closed re-enters on the very next tick
+    # off the same hour-old cached signal (see the re-entry cooldown in
+    # _run_execution_agent_scan).
+    signal_scanned_at = Column(DateTime(timezone=True), nullable=True)
+
     agent = relationship("Agent", back_populates="trades", foreign_keys=[agent_id])
 
 

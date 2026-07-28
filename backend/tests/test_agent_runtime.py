@@ -590,6 +590,99 @@ def test_modify_protection_can_remove_target(db_session, monkeypatch):
     assert trade.status == "open"
 
 
+# ---- Execution agent re-entry cooldown (stale-signal whipsaw guard) ----
+
+def _make_recommend_and_execution_agents(db_session):
+    recommend_agent = Agent(
+        agent_id="recommend-agent",
+        name="RE Test",
+        strategy="llm_recommendation",
+        active=True,
+        config={
+            "universe": {"type": "watchlist", "value": ["FOO"]},
+            "strategy_params": {"prompt": "test prompt"},
+            "risk": None,
+            "schedule": {"type": "interval", "interval_minutes": 5, "market_hours_only": False},
+        },
+    )
+    execution_agent = Agent(
+        agent_id="execution-agent",
+        name="Execution Test",
+        strategy="llm_recommendation_execution",
+        active=True,
+        config={
+            "universe": {"type": "watchlist", "value": []},
+            "strategy_params": {},
+            "risk": {
+                "buy_stop_loss_pct": 1.5,
+                "sell_stop_loss_pct": 1.5,
+                "target_pct": 1.0,
+                "max_concurrent_positions": 5,
+                "max_daily_capital": 50000,
+            },
+            "schedule": {"type": "interval", "interval_minutes": 5, "market_hours_only": False},
+        },
+    )
+    db_session.add_all([recommend_agent, execution_agent])
+    db_session.commit()
+    return recommend_agent, execution_agent
+
+
+def test_execution_agent_skips_reentry_on_same_stale_signal(db_session, monkeypatch):
+    """Regression test for the whipsaw fix: a symbol whose position just
+    closed must NOT immediately re-enter off the exact same still-cached
+    signal - only once the source Recommending agent has genuinely
+    rescanned (a newer LlmSignalCache.scanned_at) should it re-enter."""
+    from datetime import datetime, timezone
+
+    from app.agent_runtime import _run_execution_agent_scan
+    from app.models import LlmSignalCache
+    from app.strategies.base import Signal
+
+    recommend_agent, execution_agent = _make_recommend_and_execution_agents(db_session)
+
+    monkeypatch.setattr("app.agent_runtime.get_market_data_adapter", lambda: FakeMarketDataAdapter({"FOO": 100.0}))
+
+    fake_signals = [Signal(symbol="FOO", direction="buy", confidence=0.9, reason="test breakout")]
+    monkeypatch.setattr(
+        "app.agent_runtime.get_or_scan_llm_signals",
+        lambda *a, **k: (["FOO"], FakeMarketDataAdapter({"FOO": 100.0}).get_snapshot(["FOO"]), fake_signals),
+    )
+
+    t1 = datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc)
+    db_session.add(LlmSignalCache(agent_id=recommend_agent.agent_id, signals_json="[]", scanned_at=t1))
+    db_session.commit()
+
+    _run_execution_agent_scan(db_session, execution_agent, execution_agent.config, None)
+    trades = db_session.query(Trade).all()
+    assert len(trades) == 1
+    # SQLite round-trips tz-aware datetimes as naive (see _ensure_utc) -
+    # compare naive-to-naive rather than asserting exact equality with t1.
+    assert trades[0].signal_scanned_at == t1.replace(tzinfo=None)
+
+    # Close the position out (simulating a stop-loss/target hit) without
+    # any fresh scan happening - scanned_at on the cache is still t1.
+    trades[0].status = "closed"
+    db_session.commit()
+
+    _run_execution_agent_scan(db_session, execution_agent, execution_agent.config, None)
+    assert db_session.query(Trade).count() == 1, "must not re-enter off the same stale signal"
+    skipped_log = (
+        db_session.query(AgentLog)
+        .filter(AgentLog.decision == "skipped", AgentLog.reason.like("waiting for a fresh scan%"))
+        .first()
+    )
+    assert skipped_log is not None
+
+    # A genuinely fresh scan (newer scanned_at) must be allowed to re-enter.
+    cache = db_session.query(LlmSignalCache).filter_by(agent_id=recommend_agent.agent_id).first()
+    cache.scanned_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    db_session.commit()
+
+    _run_execution_agent_scan(db_session, execution_agent, execution_agent.config, None)
+    assert db_session.query(Trade).count() == 2, "a fresh signal must be allowed to re-enter"
+
+
 # ---- Section 5.1 screener universe - standard fundamentals bar ----
 
 class FakeScreenerAdapter(FakeMarketDataAdapter):

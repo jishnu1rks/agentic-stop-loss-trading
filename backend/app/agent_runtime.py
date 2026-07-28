@@ -204,6 +204,18 @@ def _deserialize_signals(signals_json: str) -> list[Signal]:
     return [Signal(**item) for item in json.loads(signals_json)]
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """SQLite has no native tz-aware datetime type, so a DateTime(timezone=True)
+    column round-trips as naive even though every value written here is UTC
+    (see get_or_scan_llm_signals's original inline version of this exact
+    fixup, and routers.agents._as_utc for the same gotcha on the read/API
+    side) - comparing two naive-but-actually-UTC datetimes is fine, but
+    mixing a naive one with an aware `datetime.now(timezone.utc)` raises."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
 def get_or_scan_llm_signals(
     db: Session,
     cache_key: str,
@@ -265,9 +277,7 @@ def get_or_scan_llm_signals(
         return _from_cache() if cache_usable else ([], MarketDataSnapshot(prices={}, history={}, volumes={}), [])
 
     if not force and cache_usable:
-        scanned_at = cached.scanned_at
-        if scanned_at.tzinfo is None:
-            scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+        scanned_at = _ensure_utc(cached.scanned_at)
         if now_utc - scanned_at < LLM_SCAN_MIN_INTERVAL:
             return _from_cache()
 
@@ -776,12 +786,17 @@ def enter_position(
     target_pct: float | None,
     is_manual: bool = False,
     source_agent_id: str | None = None,
+    signal_scanned_at: datetime | None = None,
 ) -> Trade:
     """Entry + Protect (Section 4 steps 3-4), shared by agents and manual
     trades. source_agent_id is only ever passed for llm_recommendation_execution
     trades - the Recommending agent whose signal this mirrors (see
     run_agent_scan) - so the trade log can show which Recommending agent
-    actually flagged the stock, not just which agent placed the order."""
+    actually flagged the stock, not just which agent placed the order.
+    signal_scanned_at (also execution-trades-only) records which of that
+    Recommending agent's scans this entry came from, so a later scan can
+    tell a genuinely fresh signal apart from the same stale one already
+    acted on (see _run_execution_agent_scan's re-entry cooldown)."""
     broker = get_broker_adapter()
     trade_id = str(uuid.uuid4())
 
@@ -806,6 +821,7 @@ def enter_position(
         status="open",
         broker_order_id=fill.order_id,
         is_manual=is_manual,
+        signal_scanned_at=signal_scanned_at,
     )
 
     if sl_pct is not None:
@@ -1085,6 +1101,28 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     db.commit()
 
 
+def _last_trade_signal_scanned_at(
+    db: Session, agent_id: str, source_agent_id: str, symbol: str
+) -> datetime | None:
+    """The signal_scanned_at of the most recent trade this Execution agent
+    placed on `symbol` off `source_agent_id`'s signal, or None if there's no
+    prior trade for this combo. Backs the re-entry cooldown below: a symbol
+    whose position just closed would otherwise re-enter on the very next
+    scan tick off the exact same still-cached signal, since _open_symbols
+    only excludes symbols with a currently *open* trade."""
+    last = (
+        db.query(Trade.signal_scanned_at)
+        .filter(
+            Trade.agent_id == agent_id,
+            Trade.source_agent_id == source_agent_id,
+            Trade.stock_symbol == symbol,
+        )
+        .order_by(Trade.created_at.desc())
+        .first()
+    )
+    return _ensure_utc(last[0]) if last else None
+
+
 def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_data_adapter) -> None:
     """The llm_recommendation_execution branch of run_agent_scan: aggregates
     signals from every active Recommending agent (_find_recommend_only_agents)
@@ -1093,7 +1131,13 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
     no new API calls beyond what each Recommending agent already makes on
     its own. If two sources both flag the same symbol, whichever is
     processed first enters and the second is skipped as "already holding a
-    position" via the same open_symbols check used for every other signal."""
+    position" via the same open_symbols check used for every other signal.
+
+    Re-entry cooldown: a symbol's last trade (via _last_trade_signal_scanned_at)
+    is compared against the CURRENT signal's scanned_at - if they match (or
+    the current one is somehow older), the source agent hasn't actually
+    rescanned since that trade was placed, so this is the same stale signal
+    being acted on twice rather than a fresh call to buy/sell again."""
     source_agents = _find_recommend_only_agents(db)
     if not source_agents:
         _log(db, agent.agent_id, None, "paused", "no active Recommending agent to mirror")
@@ -1109,7 +1153,7 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
         db.commit()
         return
 
-    combined: list[tuple[Agent, Signal, float]] = []
+    combined: list[tuple[Agent, Signal, float, datetime | None]] = []
     for source_agent in source_agents:
         try:
             universe, snapshot, signals = get_or_scan_llm_signals(
@@ -1118,6 +1162,12 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
         except MarketDataUnavailableError as exc:
             _log(db, agent.agent_id, None, "paused", f"market data unavailable for {source_agent.name}: {exc}")
             continue
+
+        # Same LlmSignalCache row get_or_scan_llm_signals just read/wrote -
+        # its scanned_at is "when was this exact batch of signals produced",
+        # which is what the re-entry cooldown below compares against.
+        cache_row = db.query(LlmSignalCache).filter_by(agent_id=source_agent.agent_id).first()
+        scanned_at = _ensure_utc(cache_row.scanned_at) if cache_row else None
 
         filtered = _filter_execution_signals(signals, config.get("strategy_params", {}))
         filtered_symbols = {s.symbol for s in filtered}
@@ -1128,7 +1178,7 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
         for signal in filtered:
             price = snapshot.prices.get(signal.symbol)
             if price is not None:
-                combined.append((source_agent, signal, price))
+                combined.append((source_agent, signal, price, scanned_at))
 
     if not combined:
         db.commit()
@@ -1140,9 +1190,20 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
     capital_used = _capital_committed_today(db, agent.agent_id)
     free_capital = get_capital_summary(db)["free_capital"]
 
-    for source_agent, signal, price in combined:
+    for source_agent, signal, price, scanned_at in combined:
         if signal.symbol in open_symbols:
             _log(db, agent.agent_id, signal.symbol, "skipped", "already holding a position")
+            continue
+        last_scanned_at = _last_trade_signal_scanned_at(db, agent.agent_id, source_agent.agent_id, signal.symbol)
+        if last_scanned_at is not None and scanned_at is not None and last_scanned_at >= scanned_at:
+            _log(
+                db,
+                agent.agent_id,
+                signal.symbol,
+                "skipped",
+                f"waiting for a fresh scan from {source_agent.name} before re-entering - "
+                "last entry already acted on this same signal",
+            )
             continue
         if open_count >= risk["max_concurrent_positions"]:
             _log(db, agent.agent_id, signal.symbol, "skipped", "max_concurrent_positions reached")
@@ -1167,6 +1228,7 @@ def _run_execution_agent_scan(db: Session, agent: Agent, config: dict, market_da
             buy_stop_loss_pct=risk.get("buy_stop_loss_pct"),
             sell_stop_loss_pct=risk.get("sell_stop_loss_pct"),
             target_pct=risk.get("target_pct"),
+            signal_scanned_at=scanned_at,
         )
         _log(db, agent.agent_id, signal.symbol, "entered", signal.reason)
         db.commit()
