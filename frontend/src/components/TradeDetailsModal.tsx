@@ -3,9 +3,9 @@ import { api } from "../api/client";
 import type { ChargesBreakdown, OpenPositionPnl, Trade } from "../api/types";
 import Modal from "./Modal";
 
-function fmtDateOnly(d: string | null) {
+function fmtDateTime(d: string | null) {
   if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-IN", { dateStyle: "medium" });
+  return new Date(d).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 }
 
 export default function TradeDetailsModal({
@@ -42,45 +42,72 @@ export default function TradeDetailsModal({
       {error && <div className="error-banner">{error}</div>}
       {data && (
         <>
-          <dl className="detail-rows">
-            <dt>Direction</dt>
-            <dd>{trade.direction}</dd>
-            <dt>Mode</dt>
-            <dd>{trade.is_manual ? "Manual" : agentName}</dd>
-            <dt>Quantity</dt>
-            <dd>{trade.quantity}</dd>
-            <dt>Buy price</dt>
-            <dd>{trade.buy_price.toFixed(2)}</dd>
-            <dt>Buy date</dt>
-            <dd>{fmtDateOnly(trade.purchase_date)}</dd>
-            {trade.status === "open" ? (
-              <>
-                <dt>CMP</dt>
-                <dd>{pnl ? pnl.current_price.toFixed(2) : "—"}</dd>
-              </>
-            ) : (
-              <>
-                <dt>Sell price</dt>
-                <dd>{trade.sell_price != null ? trade.sell_price.toFixed(2) : "—"}</dd>
-                <dt>Sell date</dt>
-                <dd>{fmtDateOnly(trade.sell_date)}</dd>
-              </>
-            )}
-            <dt>Stop loss</dt>
-            <dd>
-              {trade.stop_loss_price
-                ? `${trade.stop_loss_price.toFixed(2)}${trade.stop_loss_pct ? ` (-${trade.stop_loss_pct.toFixed(1)}%)` : ""}`
-                : "—"}
-            </dd>
-            <dt>Target</dt>
-            <dd>
-              {trade.target_price != null
-                ? `${trade.target_price.toFixed(2)}${trade.target_pct != null ? ` (${trade.target_pct.toFixed(1)}%)` : ""}`
-                : "—"}
-            </dd>
-            <dt>Investment</dt>
-            <dd>{(trade.buy_price * trade.quantity).toFixed(2)}</dd>
-          </dl>
+          {/* Ordered as a financial narrative - direction/size/entry, what
+              that entry committed (Investment), current standing (CMP or
+              exit), then the risk bounds around it - with Mode (which
+              agent placed it) last, since it's account metadata rather
+              than a financial figure. */}
+          <table className="trade-detail-table">
+            <tbody>
+              <tr>
+                <th>Direction</th>
+                <td>{trade.direction}</td>
+              </tr>
+              <tr>
+                <th>Quantity</th>
+                <td>{trade.quantity}</td>
+              </tr>
+              <tr>
+                <th>Buy price</th>
+                <td>{trade.buy_price.toFixed(2)}</td>
+              </tr>
+              <tr>
+                <th>Buy date</th>
+                <td>{fmtDateTime(trade.purchase_date)}</td>
+              </tr>
+              <tr>
+                <th>Investment</th>
+                <td>{(trade.buy_price * trade.quantity).toFixed(2)}</td>
+              </tr>
+              {trade.status === "open" ? (
+                <tr>
+                  <th>CMP</th>
+                  <td>{pnl ? pnl.current_price.toFixed(2) : "—"}</td>
+                </tr>
+              ) : (
+                <>
+                  <tr>
+                    <th>Sell price</th>
+                    <td>{trade.sell_price != null ? trade.sell_price.toFixed(2) : "—"}</td>
+                  </tr>
+                  <tr>
+                    <th>Sell date</th>
+                    <td>{fmtDateTime(trade.sell_date)}</td>
+                  </tr>
+                </>
+              )}
+              <tr>
+                <th>Stop loss</th>
+                <td>
+                  {trade.stop_loss_price
+                    ? `${trade.stop_loss_price.toFixed(2)}${trade.stop_loss_pct ? ` (-${trade.stop_loss_pct.toFixed(1)}%)` : ""}`
+                    : "—"}
+                </td>
+              </tr>
+              <tr>
+                <th>Target</th>
+                <td>
+                  {trade.target_price != null
+                    ? `${trade.target_price.toFixed(2)}${trade.target_pct != null ? ` (${trade.target_pct.toFixed(1)}%)` : ""}`
+                    : "—"}
+                </td>
+              </tr>
+              <tr>
+                <th>Mode</th>
+                <td>{trade.is_manual ? "Manual" : agentName}</td>
+              </tr>
+            </tbody>
+          </table>
 
           <div style={{ borderTop: "1px solid var(--panel-border)", margin: "14px 0" }} />
 

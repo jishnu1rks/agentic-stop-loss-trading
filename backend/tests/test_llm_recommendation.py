@@ -9,7 +9,7 @@ from google.genai.models import Models
 
 from app.adapters.market_data.base import MarketDataSnapshot
 from app.config import settings
-from app.strategies.llm_recommendation import LlmRecommendationStrategy
+from app.strategies.llm_recommendation import LlmCallFailedError, LlmRecommendationStrategy
 
 
 @pytest.fixture(autouse=True)
@@ -50,7 +50,8 @@ def test_no_signal_when_api_key_missing(monkeypatch):
     monkeypatch.setattr(settings, "anthropic_api_key", None)
     strategy = LlmRecommendationStrategy()
     snapshot = MarketDataSnapshot(prices={"RELIANCE": 2420.0}, history={})
-    assert strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy dips"}) == []
+    with pytest.raises(LlmCallFailedError):
+        strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy dips"})
 
 
 def test_parses_signals_from_model_response(monkeypatch):
@@ -90,7 +91,7 @@ def test_ignores_signals_for_symbols_outside_universe(monkeypatch):
     assert strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy oversold blue chips"}) == []
 
 
-def test_returns_no_signals_on_api_error(monkeypatch):
+def test_raises_on_api_error(monkeypatch):
     def fake_create(self, **kwargs):
         raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
 
@@ -99,7 +100,8 @@ def test_returns_no_signals_on_api_error(monkeypatch):
     strategy = LlmRecommendationStrategy()
     snapshot = MarketDataSnapshot(prices={"RELIANCE": 2420.0}, history={})
 
-    assert strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy oversold blue chips"}) == []
+    with pytest.raises(LlmCallFailedError):
+        strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy oversold blue chips"})
 
 
 def test_no_signal_when_gemini_api_key_missing(monkeypatch):
@@ -109,7 +111,8 @@ def test_no_signal_when_gemini_api_key_missing(monkeypatch):
     strategy = LlmRecommendationStrategy()
     snapshot = MarketDataSnapshot(prices={"RELIANCE": 2420.0}, history={})
 
-    assert strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy dips"}) == []
+    with pytest.raises(LlmCallFailedError):
+        strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy dips"})
 
 
 def test_parses_signals_from_gemini_response(monkeypatch):
@@ -136,7 +139,7 @@ def test_parses_signals_from_gemini_response(monkeypatch):
     assert signals[0].confidence == pytest.approx(0.8)
 
 
-def test_returns_no_signals_on_gemini_api_error(monkeypatch):
+def test_raises_on_gemini_api_error(monkeypatch):
     monkeypatch.setattr(settings, "llm_provider", "gemini")
     monkeypatch.setattr(settings, "gemini_api_key", "test-gemini-key")
 
@@ -148,4 +151,5 @@ def test_returns_no_signals_on_gemini_api_error(monkeypatch):
     strategy = LlmRecommendationStrategy()
     snapshot = MarketDataSnapshot(prices={"RELIANCE": 2420.0}, history={})
 
-    assert strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy oversold blue chips"}) == []
+    with pytest.raises(LlmCallFailedError):
+        strategy.scan(["RELIANCE"], snapshot, {"prompt": "buy oversold blue chips"})

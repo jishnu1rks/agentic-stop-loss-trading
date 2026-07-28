@@ -100,6 +100,14 @@ export interface AgentConfig {
 // Same shape as AgentConfig - used when submitting an update (PUT /agents/{id}).
 export type AgentConfigIn = AgentConfig;
 
+// Only present for strategy === "llm_recommendation" (see
+// routers/agents.py's _attach_llm_status) - null for every other strategy.
+export interface LlmStatus {
+  last_scanned_at: string | null;
+  last_attempted_at: string | null;
+  last_error: string | null;
+}
+
 export interface Agent {
   agent_id: string;
   name: string;
@@ -107,6 +115,7 @@ export interface Agent {
   config: AgentConfig;
   active: boolean;
   created_at: string;
+  llm_status?: LlmStatus | null;
 }
 
 export interface Kpis {

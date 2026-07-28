@@ -19,6 +19,16 @@ from app.adapters.market_data.base import MarketDataSnapshot
 from app.config import settings
 from app.strategies.base import Signal, Strategy
 
+
+class LlmCallFailedError(Exception):
+    """Raised when the LLM API call itself fails (missing key, network
+    error, provider outage) - deliberately distinct from a clean scan that
+    legitimately found zero signals, which returns [] the same as always.
+    Without this distinction, get_or_scan_llm_signals had no way to tell
+    "the market's just quiet" apart from "the LLM has been failing for
+    hours", and both looked identical to a human staring at an empty
+    Recommendations panel."""
+
 _SIGNAL_SCHEMA = {
     "type": "object",
     "properties": {
@@ -160,11 +170,9 @@ class LlmRecommendationStrategy(Strategy):
         provider = settings.llm_provider
         if provider == "gemini":
             if not settings.gemini_api_key:
-                # Fail-safe: no key configured yet - treat exactly like a
-                # paused scan rather than raising (Section 9).
-                return []
+                raise LlmCallFailedError("No Gemini API key configured")
         elif not settings.anthropic_api_key:
-            return []
+            raise LlmCallFailedError("No Anthropic API key configured")
 
         market_summary = _build_market_summary(universe, market_data)
         if not market_summary:
@@ -173,8 +181,6 @@ class LlmRecommendationStrategy(Strategy):
         user_content = _user_content(prompt, universe, market_summary)
         text = _call_gemini(user_content) if provider == "gemini" else _call_anthropic(user_content)
         if text is None:
-            # Fail-safe: an LLM outage pauses this scan cycle rather than
-            # acting on no data, same posture as MarketDataUnavailableError.
-            return []
+            raise LlmCallFailedError(f"{provider} API call failed")
 
         return _parse_signals(text, universe)

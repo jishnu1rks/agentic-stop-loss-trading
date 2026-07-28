@@ -38,6 +38,8 @@ _MISSING_COLUMNS: list[tuple[str, str, str]] = [
     # SQLite and Postgres, the only two engines this app targets.
     ("llm_signal_cache", "universe_json", "TEXT"),
     ("trades", "source_agent_id", "VARCHAR"),
+    ("llm_signal_cache", "last_attempted_at", "DATETIME"),
+    ("llm_signal_cache", "last_error", "TEXT"),
 ]
 
 

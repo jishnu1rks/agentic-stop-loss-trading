@@ -9,6 +9,7 @@ export default function ProtectionField({
   secondaryText,
   hint,
   optional,
+  showModeToggle = true,
 }: {
   label: string;
   mode: ProtectionMode;
@@ -18,6 +19,10 @@ export default function ProtectionField({
   secondaryText?: string;
   hint?: string;
   optional?: boolean;
+  // false when a shared toggle above multiple fields already controls
+  // mode for all of them (see EditProtectionModal) - avoids repeating the
+  // same Price/% control per field.
+  showModeToggle?: boolean;
 }) {
   return (
     <div className="modal-field">
@@ -26,14 +31,16 @@ export default function ProtectionField({
           {label}
           {optional ? " (optional)" : ""}
         </label>
-        <div className="mode-toggle">
-          <button type="button" className={mode === "price" ? "active" : ""} onClick={() => onModeChange("price")}>
-            Price
-          </button>
-          <button type="button" className={mode === "pct" ? "active" : ""} onClick={() => onModeChange("pct")}>
-            %
-          </button>
-        </div>
+        {showModeToggle && (
+          <div className="mode-toggle">
+            <button type="button" className={mode === "price" ? "active" : ""} onClick={() => onModeChange("price")}>
+              Price
+            </button>
+            <button type="button" className={mode === "pct" ? "active" : ""} onClick={() => onModeChange("pct")}>
+              %
+            </button>
+          </div>
+        )}
       </div>
       <input
         type="number"

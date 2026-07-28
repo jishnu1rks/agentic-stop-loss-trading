@@ -37,6 +37,17 @@ const DEFAULT_RISK: AgentRiskConfig = {
 // pre-existing unconditional behavior) or restricted to one side.
 type ExecutionDirectionFilter = "both" | "buy" | "sell";
 
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.round(diffMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
 export default function AgentSettingsCard({
   agent,
   allAgents = [],
@@ -226,6 +237,23 @@ export default function AgentSettingsCard({
       </div>
 
       <div className="agent-description">{strategyDescription(agent.strategy)}</div>
+
+      {isLlmRecommendation && agent.llm_status && (
+        <div style={{ marginBottom: 16 }}>
+          {agent.llm_status.last_error ? (
+            <div className="error-banner">
+              ⚠ Last scan attempt failed
+              {formatRelativeTime(agent.llm_status.last_attempted_at) &&
+                ` ${formatRelativeTime(agent.llm_status.last_attempted_at)}`}
+              : {agent.llm_status.last_error}
+            </div>
+          ) : (
+            <div className="text-dim" style={{ fontSize: 12 }}>
+              Last successful scan: {formatRelativeTime(agent.llm_status.last_scanned_at) || "never yet"}
+            </div>
+          )}
+        </div>
+      )}
 
       {error && <div className="error-banner">{error}</div>}
 

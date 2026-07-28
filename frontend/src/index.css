@@ -677,6 +677,32 @@ tr:hover td {
   color: var(--text);
 }
 
+/* key/value detail table inside a modal (TradeDetailsModal's first section) */
+.trade-detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.trade-detail-table th,
+.trade-detail-table td {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+.trade-detail-table tr:last-child th,
+.trade-detail-table tr:last-child td {
+  border-bottom: none;
+}
+.trade-detail-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.trade-detail-table td {
+  text-align: right;
+  font-weight: 600;
+}
+
 /* key/value detail rows inside a modal */
 .detail-rows {
   display: grid;

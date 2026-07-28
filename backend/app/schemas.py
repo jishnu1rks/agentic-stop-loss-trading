@@ -85,6 +85,17 @@ class AgentConfigIn(BaseModel):
         return self
 
 
+class LlmStatusOut(BaseModel):
+    """Only populated for a strategy=='llm_recommendation' agent (see
+    agents.list_agents/get_agent) - lets the UI show "last successful scan"
+    / surface a live LLM failure instead of an empty Recommendations panel
+    looking identical to a genuinely quiet market (see LlmCallFailedError)."""
+
+    last_scanned_at: datetime | None
+    last_attempted_at: datetime | None
+    last_error: str | None
+
+
 class AgentOut(BaseModel):
     agent_id: str
     name: str
@@ -92,6 +103,7 @@ class AgentOut(BaseModel):
     config: dict[str, Any]
     active: bool
     created_at: datetime
+    llm_status: LlmStatusOut | None = None
 
     model_config = {"from_attributes": True}
 

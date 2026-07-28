@@ -124,7 +124,18 @@ class LlmSignalCache(Base):
     # get_or_scan_llm_signals treats a null value as "not usable, re-scan."
     universe_json = Column(Text, nullable=True)
     signals_json = Column(Text, nullable=False)
-    scanned_at = Column(DateTime(timezone=True), nullable=False)
+    # Nullable so a row can exist purely to record a failed first-ever
+    # attempt (last_error set below) before any scan has ever succeeded -
+    # cache_usable (get_or_scan_llm_signals) gates on universe_json, not
+    # this column, so that path never touches scanned_at while it's null.
+    scanned_at = Column(DateTime(timezone=True), nullable=True)
+    # Recorded on every real scan attempt (not cache-served reads), success
+    # or failure - lets the UI distinguish "quiet, no signals today" from
+    # "the LLM call has actually been failing" (see LlmCallFailedError),
+    # which look identical from signals_json alone. last_error is cleared
+    # back to null on the next successful attempt.
+    last_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
 
 
 class AgentLog(Base):

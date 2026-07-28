@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -9,9 +11,9 @@ from app.agent_runtime import (
 )
 from app.adapters.market_data.yfinance_adapter import MarketDataUnavailableError
 from app.db import get_db
-from app.models import Agent, AgentLog
+from app.models import Agent, AgentLog, LlmSignalCache
 from app.scheduler import schedule_agent, unschedule_agent
-from app.schemas import AgentConfigIn, AgentOut
+from app.schemas import AgentConfigIn, AgentOut, LlmStatusOut
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -29,9 +31,47 @@ def _config_dict(payload: AgentConfigIn) -> dict:
     }
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """SQLite has no native tz-aware datetime type, so a DateTime(timezone=True)
+    column round-trips as a naive datetime even though it only ever holds
+    UTC values (see get_or_scan_llm_signals's identical fixup for
+    scanned_at) - left naive, FastAPI serializes it with no 'Z'/offset,
+    and a non-UTC browser then parses that string as ITS OWN local time,
+    silently shifting "last scan" by the browser's UTC offset."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
+def _attach_llm_status(agents: list[Agent], db: Session) -> list[Agent]:
+    """Populates AgentOut.llm_status for every strategy=='llm_recommendation'
+    agent from its LlmSignalCache row (get_or_scan_llm_signals is what
+    writes last_attempted_at/last_error there) - a plain attribute set on
+    the ORM instance, read straight back off by Pydantic's from_attributes
+    when serializing as AgentOut."""
+    llm_agent_ids = [a.agent_id for a in agents if a.strategy == "llm_recommendation"]
+    caches = (
+        {c.agent_id: c for c in db.query(LlmSignalCache).filter(LlmSignalCache.agent_id.in_(llm_agent_ids)).all()}
+        if llm_agent_ids
+        else {}
+    )
+    for agent in agents:
+        cache = caches.get(agent.agent_id)
+        agent.llm_status = (
+            LlmStatusOut(
+                last_scanned_at=_as_utc(cache.scanned_at),
+                last_attempted_at=_as_utc(cache.last_attempted_at),
+                last_error=cache.last_error,
+            )
+            if cache is not None
+            else None
+        )
+    return agents
+
+
 @router.get("", response_model=list[AgentOut])
 def list_agents(db: Session = Depends(get_db)):
-    return db.query(Agent).all()
+    return _attach_llm_status(db.query(Agent).all(), db)
 
 
 @router.get("/{agent_id}", response_model=AgentOut)
@@ -39,6 +79,7 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
     if agent is None:
         raise HTTPException(404, "Agent not found")
+    _attach_llm_status([agent], db)
     return agent
 
 

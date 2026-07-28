@@ -241,13 +241,6 @@ export default function TradeLogTable({
     if (t.status === "open") return pnl ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : "";
     return (t.net_profit ?? 0) >= 0 ? "text-green" : "text-red";
   };
-  // Open Trades' CMP cell is colored by the same profit/loss sign that used
-  // to color the P&L cell there - the P&L cell itself is intentionally
-  // uncolored on that view now.
-  const currentPriceClass = (t: Trade, pnl?: OpenPositionPnl): string => {
-    if (t.status !== "open" || !pnl) return "";
-    return pnl.unrealized_pnl >= 0 ? "text-green" : "text-red";
-  };
 
   const cols: Record<string, Column> = {
     stock: {
@@ -264,7 +257,6 @@ export default function TradeLogTable({
       id: "current_price",
       label: "CMP",
       cell: (t, pnl) => (t.status === "open" && pnl ? `${pnl.current_price.toFixed(2)}` : "—"),
-      cellClassName: currentPriceClass,
     },
     direction: {
       id: "direction",
@@ -295,7 +287,6 @@ export default function TradeLogTable({
           value
         );
       },
-      cellClassName: (t) => (t.stop_loss_price ? "text-red" : ""),
     },
     target: {
       id: "target",
@@ -314,7 +305,6 @@ export default function TradeLogTable({
           value
         );
       },
-      cellClassName: (t) => (t.target_price != null ? "text-green" : ""),
     },
     buyDate: {
       id: "buy_date",
@@ -345,8 +335,8 @@ export default function TradeLogTable({
     netPnl: { id: "net_pnl", label: "Net P&L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
     // Open Trades view: same figure as netPnlCell (unrealized P&L isn't
     // really "net" vs "gross" - there's no exit charge/tax yet to net out),
-    // just relabeled and left uncolored since CMP carries the color there now.
-    openPnl: { id: "open_pnl", label: "P & L", sortKey: "net_profit", cell: netPnlCell },
+    // just relabeled.
+    openPnl: { id: "open_pnl", label: "P & L", sortKey: "net_profit", cell: netPnlCell, cellClassName: netPnlClass },
     mode: {
       id: "mode",
       label: "Agent",

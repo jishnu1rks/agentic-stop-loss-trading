@@ -23,6 +23,7 @@ from app.fundamentals import classify_cap_size, is_recommendable
 from app.models import Agent, AgentLog, LlmSignalCache, Trade
 from app.strategies import get_strategy
 from app.strategies.base import Signal
+from app.strategies.llm_recommendation import LlmCallFailedError
 from app.tax import estimate_tax
 
 
@@ -277,12 +278,38 @@ def get_or_scan_llm_signals(
 
     universe = resolve_universe(config, market_data_adapter)
     snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
-    signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
+
+    try:
+        signals = get_strategy("llm_recommendation").scan(universe, snapshot, strategy_params)
+    except LlmCallFailedError as exc:
+        # Recorded distinctly from a clean zero-signal scan (see
+        # LlmCallFailedError) so the UI can surface "the LLM has been
+        # failing" instead of looking identically quiet either way. Falls
+        # back to the last good cache the same as the window/interval
+        # guards above - a transient outage shouldn't blank the dashboard.
+        if cached:
+            cached.last_attempted_at = now_utc
+            cached.last_error = str(exc)
+        else:
+            db.add(
+                LlmSignalCache(
+                    agent_id=cache_key,
+                    signals_json="[]",
+                    last_attempted_at=now_utc,
+                    last_error=str(exc),
+                )
+            )
+        db.commit()
+        if cache_usable:
+            return _from_cache()
+        return [], MarketDataSnapshot(prices={}, history={}, volumes={}), []
 
     if cached:
         cached.universe_json = json.dumps(universe)
         cached.signals_json = _serialize_signals(signals)
         cached.scanned_at = now_utc
+        cached.last_attempted_at = now_utc
+        cached.last_error = None
     else:
         db.add(
             LlmSignalCache(
@@ -290,6 +317,8 @@ def get_or_scan_llm_signals(
                 universe_json=json.dumps(universe),
                 signals_json=_serialize_signals(signals),
                 scanned_at=now_utc,
+                last_attempted_at=now_utc,
+                last_error=None,
             )
         )
     db.commit()
