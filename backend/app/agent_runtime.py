@@ -209,6 +209,7 @@ def get_or_scan_llm_signals(
     config: dict,
     market_data_adapter,
     force: bool = False,
+    allow_scan: bool = True,
 ) -> tuple[list[str], MarketDataSnapshot, list[Signal]]:
     """Throttled front door for the llm_recommendation strategy's full
     Scan step (universe resolution + market snapshot + LLM call): at most
@@ -218,6 +219,14 @@ def get_or_scan_llm_signals(
     it. Outside the window, falls back to the last cached universe/result
     (or empty if none exists yet) rather than blocking entirely, so the
     dashboard doesn't go blank outside trading hours.
+
+    allow_scan=False (set by build_llm_execution_recommendations for a
+    source agent that's been deactivated - see
+    _find_recommend_agents_for_display) hard-disables both the interval
+    check and force: a deactivated Recommending agent must never spend a
+    live LLM call again, and must never have its scanned_at bumped, or the
+    stale-cache purge that's supposed to make its card disappear would
+    keep getting reset.
 
     Universe resolution is cached alongside the signals - not just the LLM
     call - because get_tiered_trending_symbols hits Yahoo's unofficial
@@ -250,6 +259,9 @@ def get_or_scan_llm_signals(
         universe = json.loads(cached.universe_json)
         snapshot = market_data_adapter.get_snapshot(universe, lookback_days=lookback_days)
         return universe, snapshot, _deserialize_signals(cached.signals_json)
+
+    if not allow_scan:
+        return _from_cache() if cache_usable else ([], MarketDataSnapshot(prices={}, history={}, volumes={}), [])
 
     if not force and cache_usable:
         scanned_at = cached.scanned_at
@@ -546,7 +558,9 @@ def build_llm_recommendations(db: Session, agent: Agent, force: bool = False) ->
     free_capital = get_capital_summary(db)["free_capital"]
     budget = free_capital * RECOMMENDATION_BUDGET_PCT_OF_FREE_CAPITAL
 
-    _universe, snapshot, signals = get_or_scan_llm_signals(db, agent.agent_id, config, market_data_adapter, force=force)
+    _universe, snapshot, signals = get_or_scan_llm_signals(
+        db, agent.agent_id, config, market_data_adapter, force=force, allow_scan=agent.active
+    )
 
     recommendations = []
     for signal in signals:
@@ -590,8 +604,41 @@ def _find_recommend_only_agents(db: Session) -> list[Agent]:
     agent aggregates signals from all of them, excluding only inactive ones.
     (Every llm_recommendation-strategy agent structurally has risk=None,
     enforced by AgentConfigIn._check_risk_required_for_trading_strategies,
-    so filtering on that would be redundant here.)"""
+    so filtering on that would be redundant here.) Real-money-shaped path
+    (feeds _run_execution_agent_scan, which places trades) - a deactivated
+    Recommending agent must drop out of this immediately. For the display-
+    only equivalent, see _find_recommend_agents_for_display."""
     return db.query(Agent).filter(Agent.strategy == "llm_recommendation", Agent.active == True).all()  # noqa: E712
+
+
+def _find_recommend_agents_for_display(db: Session) -> list[Agent]:
+    """Every Recommending agent an Execution agent's recommendation CARDS
+    (not trades) should mirror: active ones, plus any just-deactivated one
+    that still has a cached signal. Deactivating a Recommending agent drops
+    its scheduled job outright (unschedule_agent), so nothing will ever
+    refresh or clear that stale cache row on its own - _purge_stale_
+    recommendation_caches deletes it the next time any active agent's scan
+    runs (run_agent_scan), which is what makes the card disappear here."""
+    return (
+        db.query(Agent)
+        .filter(Agent.strategy == "llm_recommendation")
+        .filter((Agent.active == True) | (Agent.agent_id.in_(db.query(LlmSignalCache.agent_id))))  # noqa: E712
+        .all()
+    )
+
+
+def _purge_stale_recommendation_caches(db: Session) -> None:
+    """Deletes the cached signal for every deactivated Recommending agent -
+    called once per active agent's scan tick (run_agent_scan), since a
+    deactivated agent's own job is removed outright (unschedule_agent) and
+    would otherwise never come back around to clean up after itself. This
+    is what makes a stale card drop out of
+    _find_recommend_agents_for_display: once the row is gone, that agent no
+    longer matches its "has a cache row" clause."""
+    inactive_ids = db.query(Agent.agent_id).filter(
+        Agent.strategy == "llm_recommendation", Agent.active == False  # noqa: E712
+    )
+    db.query(LlmSignalCache).filter(LlmSignalCache.agent_id.in_(inactive_ids)).delete(synchronize_session=False)
 
 
 def _filter_execution_signals(signals: list[Signal], strategy_params: dict) -> list[Signal]:
@@ -619,7 +666,7 @@ def build_llm_execution_recommendations(db: Session, agent: Agent, force: bool =
     flag the same symbol, both show up as separate cards - each is an
     independent AI opinion, not a duplicate."""
     market_data_adapter = get_market_data_adapter()
-    source_agents = _find_recommend_only_agents(db)
+    source_agents = _find_recommend_agents_for_display(db)
     if not source_agents:
         return []
 
@@ -632,7 +679,12 @@ def build_llm_execution_recommendations(db: Session, agent: Agent, force: bool =
     for source_agent in source_agents:
         try:
             _universe, snapshot, signals = get_or_scan_llm_signals(
-                db, source_agent.agent_id, source_agent.config, market_data_adapter, force=force
+                db,
+                source_agent.agent_id,
+                source_agent.config,
+                market_data_adapter,
+                force=force,
+                allow_scan=source_agent.active,
             )
         except MarketDataUnavailableError:
             continue
@@ -899,6 +951,8 @@ def run_agent_scan(db: Session, agent: Agent) -> None:
     _run_execution_agent_scan."""
     if not agent.active:
         return
+
+    _purge_stale_recommendation_caches(db)
 
     config = agent.config
     schedule = config.get("schedule", {})

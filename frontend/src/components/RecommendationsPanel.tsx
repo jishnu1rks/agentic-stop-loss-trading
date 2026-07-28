@@ -389,7 +389,11 @@ export default function RecommendationsPanel({ onBought }: { onBought?: () => vo
               )}
               <div className="reco-grid">
                 {filteredRecos.map((reco) => (
-                  <RecommendationCard key={reco.symbol} reco={reco} onBought={onBought} />
+                  <RecommendationCard
+                    key={`${reco.symbol}-${reco.source_agent_name ?? reco.agentName ?? reco.strategy}`}
+                    reco={reco}
+                    onBought={onBought}
+                  />
                 ))}
               </div>
             </>

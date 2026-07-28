@@ -63,7 +63,15 @@ def _build_market_summary(universe: list[str], snapshot: MarketDataSnapshot) -> 
             line += f", {len(history)}d range={min(history):g}-{max(history):g}"
         volumes = snapshot.volumes.get(symbol)
         if volumes:
-            line += f", latest volume={volumes[-1]:,.0f}"
+            latest_volume = volumes[-1]
+            line += f", latest volume={latest_volume:,.0f}"
+            prior_volumes = volumes[:-1]
+            if prior_volumes:
+                avg_volume = sum(prior_volumes) / len(prior_volumes)
+                ratio = latest_volume / avg_volume if avg_volume else None
+                line += f", {len(prior_volumes)}d avg volume={avg_volume:,.0f}"
+                if ratio is not None:
+                    line += f" ({ratio:.1f}x avg)"
         lines.append(line)
     return "\n".join(lines)
 
