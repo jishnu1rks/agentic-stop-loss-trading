@@ -38,9 +38,14 @@ _MISSING_COLUMNS: list[tuple[str, str, str]] = [
     # SQLite and Postgres, the only two engines this app targets.
     ("llm_signal_cache", "universe_json", "TEXT"),
     ("trades", "source_agent_id", "VARCHAR"),
-    ("llm_signal_cache", "last_attempted_at", "DATETIME"),
+    # TIMESTAMPTZ, not DATETIME - Postgres (this app's production DB, per
+    # render.yaml) has no type named DATETIME (that's a MySQL/SQLite-ism);
+    # TIMESTAMPTZ also matches these columns' DateTime(timezone=True)
+    # declaration in models.py, and SQLite accepts it fine too (it only
+    # does loose type-affinity matching on ADD COLUMN, not strict typing).
+    ("llm_signal_cache", "last_attempted_at", "TIMESTAMPTZ"),
     ("llm_signal_cache", "last_error", "TEXT"),
-    ("trades", "signal_scanned_at", "DATETIME"),
+    ("trades", "signal_scanned_at", "TIMESTAMPTZ"),
 ]
 
 
