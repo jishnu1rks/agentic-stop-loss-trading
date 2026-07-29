@@ -255,7 +255,17 @@ export default function AgentSettingsCard({
         </label>
       </div>
 
-      <div className="agent-description">{strategyDescription(agent.strategy)}</div>
+      <div className="agent-description">
+        {descriptionExpanded ? strategyDescription(agent.strategy) : strategySummary(agent.strategy)}
+        <button
+          type="button"
+          className="link-button"
+          style={{ marginLeft: 6 }}
+          onClick={() => setDescriptionExpanded((v) => !v)}
+        >
+          {descriptionExpanded ? "Show less" : "How does this work?"}
+        </button>
+      </div>
 
       {isLlmRecommendation && agent.llm_status && (
         <div style={{ marginBottom: 16 }}>
