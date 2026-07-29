@@ -677,6 +677,97 @@ tr:hover td {
   color: var(--text);
 }
 
+/* terminal-card summary at the top of TradeDetailsModal - replaces the
+   plain key/value table for the "at a glance" section only; the detailed
+   Gross/Charges/Tax/Net breakdown below it stays on .detail-rows. */
+.trade-summary-card {
+  font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.tsc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tsc-symbol {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.tsc-direction {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+.tsc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.tsc-dot.buy { background: var(--green); }
+.tsc-dot.sell { background: var(--red); }
+.tsc-spacer { flex: 1; }
+.tsc-copy {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.tsc-copy:hover { color: var(--text); }
+.tsc-status {
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+.tsc-divider {
+  border-top: 1px dashed var(--panel-border);
+  margin: 10px 0;
+}
+.tsc-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px 14px;
+}
+.tsc-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tsc-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.tsc-value {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.tsc-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
 /* key/value detail table inside a modal (TradeDetailsModal's first section) */
 .trade-detail-table {
   width: 100%;

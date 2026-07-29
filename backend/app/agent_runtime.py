@@ -1267,8 +1267,21 @@ def monitor_open_positions(db: Session) -> None:
     memory and don't survive a restart, so a trade opened in a prior
     process lifetime would otherwise never be checked again no matter how
     far price moved past its levels.
+
+    Gated on is_market_open() - unlike run_agent_scan's entries (which
+    already respect each agent's own schedule.market_hours_only), this
+    runs on ONE shared 1-minute job with no such gate anywhere upstream
+    (see scheduler.py's "monitor-positions" job), so without this check it
+    would evaluate exits around the clock. Outside market hours yfinance
+    has no live quote to give - get_snapshot falls back to the last
+    completed daily close, which can easily sit past a stop-loss/target
+    band the live intraday price never actually crossed, force-closing the
+    trade on stale data at whatever off-hours minute the job happened to
+    run.
     """
     market_data_adapter = get_market_data_adapter()
+    if not market_data_adapter.is_market_open():
+        return
 
     open_trades = db.query(Trade).filter(Trade.status == "open").all()
     if not open_trades:

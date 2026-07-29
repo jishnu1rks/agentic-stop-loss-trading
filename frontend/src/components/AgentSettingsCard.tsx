@@ -17,6 +17,24 @@ function strategyDescription(strategy: string): string {
   return STRATEGY_DESCRIPTIONS[strategy] ?? "Scans its configured stocks on the schedule below and enters trades according to its configured strategy.";
 }
 
+// One-line summary shown by default - the full STRATEGY_DESCRIPTIONS text
+// explains the strategy TYPE's mechanism, not this agent specifically, so
+// it reads identically on every agent sharing that strategy (e.g. two
+// llm_recommendation agents with completely different prompts). Collapsed
+// by default so the card leads with what's actually agent-specific -
+// prompt, status, last scan - and the mechanism explainer is one click
+// away for whoever still wants it.
+const STRATEGY_SUMMARIES: Record<string, string> = {
+  llm_recommendation: "AI screens trending NSE stocks and flags buy/sell ideas from your prompt below.",
+  llm_recommendation_execution: "Aggregates signals from active Recommending agents and trades the ones that pass your filters below.",
+  momentum_breakout: "Enters automatically on a confirmed price/volume breakout.",
+  watchlist_trigger: "Enters when price crosses your configured band for a fixed symbol list.",
+};
+
+function strategySummary(strategy: string): string {
+  return STRATEGY_SUMMARIES[strategy] ?? "Scans and trades according to its configured strategy.";
+}
+
 // Mirrors MAX_TRADE_PCT_OF_DAILY_CAPITAL (backend/app/agent_runtime.py) -
 // no per-trade amount to configure, but no single trade may commit more
 // than this fraction of max_daily_capital either.
@@ -62,6 +80,7 @@ export default function AgentSettingsCard({
   const [name, setName] = useState(agent.name);
   const [active, setActive] = useState(agent.active);
   const [togglingActive, setTogglingActive] = useState(false);
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const isLlmRecommendation = agent.strategy === "llm_recommendation";
   const isExecutionAgent = agent.strategy === "llm_recommendation_execution";
   const [prompt, setPrompt] = useState(

@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---- Agent config (Section 5.2) ----
@@ -135,6 +135,21 @@ class TradeOut(BaseModel):
     is_manual: bool
 
     model_config = {"from_attributes": True}
+
+    @field_validator("purchase_date", "sell_date", mode="after")
+    @classmethod
+    def _assume_utc(cls, dt: datetime | None) -> datetime | None:
+        """SQLite has no native tz-aware datetime type, so these columns
+        (DateTime(timezone=True) in models.py, always written in UTC) round-
+        trip as naive - serialized without a 'Z'/offset, a non-UTC browser
+        parses the ISO string as ITS OWN local time, silently shifting
+        every displayed Entry/Exit time by the browser's UTC offset (e.g.
+        an IST user sees a time 5:30 EARLIER than it actually happened).
+        Same fixup as agent_runtime._ensure_utc / routers.agents._as_utc
+        for the identical gotcha on other tables."""
+        if dt is None or dt.tzinfo is not None:
+            return dt
+        return dt.replace(tzinfo=timezone.utc)
 
 
 class ManualTradeIn(BaseModel):

@@ -16,6 +16,11 @@ function fmtDate(d: string | null) {
   return new Date(d).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 }
 
+function fmtInr(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  return `${sign}₹${Math.round(Math.abs(n)).toLocaleString("en-IN")}`;
+}
+
 export default function EditProtectionModal({
   trade,
   pnl,
@@ -41,6 +46,7 @@ export default function EditProtectionModal({
   const [includeCharges, setIncludeCharges] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const handleModeChange = (m: ProtectionMode) => {
     const slNum = Number(slValue);
@@ -113,6 +119,20 @@ export default function EditProtectionModal({
       ? `${pnl.unrealized_pnl.toFixed(2)} (${pnl.unrealized_pnl_pct >= 0 ? "+" : ""}${pnl.unrealized_pnl_pct.toFixed(1)}%)`
       : "—";
 
+  const handleCopy = () => {
+    const lines = [
+      `${trade.stock_symbol} ${trade.direction.toUpperCase()} OPEN (${trade.is_manual ? "Manual" : agentName})`,
+      `Qty: ${trade.quantity}  Buy: ${trade.buy_price.toFixed(2)}  CMP: ${pnl ? pnl.current_price.toFixed(2) : "—"}  P&L: ${
+        pnl ? fmtInr(pnl.unrealized_pnl) : "—"
+      }`,
+      `Entry: ${fmtDate(trade.purchase_date)}`,
+    ];
+    navigator.clipboard.writeText(lines.join("\n")).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
   return (
     <Modal
       title={`Edit ${trade.stock_symbol} position`}
@@ -128,28 +148,69 @@ export default function EditProtectionModal({
         </>
       }
     >
-      <dl className="detail-rows">
-        <dt>Symbol</dt>
-        <dd>
-          {trade.stock_symbol} {trade.is_manual && <span className="pill manual">manual</span>}
-        </dd>
-        <dt>Direction</dt>
-        <dd>
-          <span className={`pill ${trade.direction}`}>{trade.direction}</span>
-        </dd>
-        <dt>Quantity</dt>
-        <dd>{trade.quantity}</dd>
-        <dt>Buy price</dt>
-        <dd>{trade.buy_price.toFixed(2)}</dd>
-        <dt>Current price</dt>
-        <dd style={{ fontWeight: 700, fontSize: 15 }}>{pnl != null ? `${pnl.current_price.toFixed(2)}` : "—"}</dd>
-        <dt>Unrealized P&amp;L</dt>
-        <dd className={pnl != null ? (pnl.unrealized_pnl >= 0 ? "text-green" : "text-red") : ""}>{pnlText}</dd>
-        <dt>Agent</dt>
-        <dd>{agentName}</dd>
-        <dt>Purchase date</dt>
-        <dd>{fmtDate(trade.purchase_date)}</dd>
-      </dl>
+      <div className="trade-summary-card">
+        <div className="tsc-header">
+          {/* No ticker here - the modal title bar already shows it. */}
+          <span className="text-dim" style={{ fontSize: 11 }}>
+            {trade.is_manual ? "Manual" : agentName}
+          </span>
+          <span className="tsc-spacer" />
+          <span className={`tsc-direction ${trade.direction}`}>
+            <span className={`tsc-dot ${trade.direction}`} />
+            {trade.direction.toUpperCase()}
+          </span>
+          <button className="tsc-copy" onClick={handleCopy} title="Copy summary">
+            {copied ? (
+              "✓"
+            ) : (
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                <path
+                  d="M3.5 10.5h-1a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v1"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                />
+              </svg>
+            )}
+          </button>
+          <span className="tsc-status">OPEN</span>
+        </div>
+
+        <div className="tsc-divider" />
+
+        <div className="tsc-stats">
+          <div className="tsc-stat">
+            <span className="tsc-label">Qty</span>
+            <span className="tsc-value">{trade.quantity}</span>
+          </div>
+          <div className="tsc-stat">
+            <span className="tsc-label">Buy</span>
+            <span className="tsc-value">{trade.buy_price.toFixed(2)}</span>
+          </div>
+          <div className="tsc-stat">
+            <span className="tsc-label">CMP</span>
+            <span className="tsc-value">{pnl != null ? pnl.current_price.toFixed(2) : "—"}</span>
+          </div>
+          <div className="tsc-stat">
+            <span className="tsc-label">P&amp;L</span>
+            <span className="tsc-value">
+              {pnl != null && (
+                <span
+                  className="tsc-dot"
+                  style={{ background: pnl.unrealized_pnl >= 0 ? "var(--green)" : "var(--red)" }}
+                />
+              )}
+              {pnlText}
+            </span>
+          </div>
+        </div>
+
+        <div className="tsc-divider" />
+
+        <div className="tsc-footer">
+          <span>Entry: {fmtDate(trade.purchase_date)}</span>
+        </div>
+      </div>
 
       <div style={{ borderTop: "1px solid var(--panel-border)", margin: "14px 0" }} />
 

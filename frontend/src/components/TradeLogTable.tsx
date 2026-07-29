@@ -50,6 +50,19 @@ export default function TradeLogTable({
   const [pnlByTradeId, setPnlByTradeId] = useState<Record<string, OpenPositionPnl>>({});
   const [agentNameById, setAgentNameById] = useState<Record<string, string>>({});
   const [agentStrategyById, setAgentStrategyById] = useState<Record<string, string>>({});
+
+  // Shared with the table's own "Agent" column below - an Execution
+  // agent's own name isn't the interesting info to show anywhere in this
+  // component; the Recommending agent whose signal actually led to the
+  // trade (source_agent_id) is, so both the column and the two detail
+  // modals (Edit/Details) need to resolve the same way rather than the
+  // modals just showing the literal placing agent_id.
+  const displayAgentName = (t: Trade): string => {
+    if (t.is_manual) return "Manual";
+    const actingStrategy = t.agent_id ? agentStrategyById[t.agent_id] : undefined;
+    const displayAgentId = actingStrategy === "llm_recommendation_execution" ? t.source_agent_id : t.agent_id;
+    return displayAgentId ? (agentNameById[displayAgentId] ?? displayAgentId) : "";
+  };
   const [statusFilter] = useState(lockedStatus ?? "");
   const [directionFilter] = useState("");
   const [exitReasonFilter] = useState("");
@@ -342,13 +355,7 @@ export default function TradeLogTable({
       label: "Agent",
       cell: (t) => {
         if (t.is_manual) return <span title="Manual trade">👆</span>;
-        // An Execution agent's own name isn't the interesting info here -
-        // show the Recommending agent whose signal actually led to this
-        // trade instead (source_agent_id, populated since that field was
-        // added; older execution trades predate it and show nothing extra).
-        const actingStrategy = t.agent_id ? agentStrategyById[t.agent_id] : undefined;
-        const displayAgentId = actingStrategy === "llm_recommendation_execution" ? t.source_agent_id : t.agent_id;
-        const label = displayAgentId ? (agentNameById[displayAgentId] ?? displayAgentId) : "";
+        const label = displayAgentName(t);
         return <span title={label}>🤖 {label}</span>;
       },
     },
@@ -507,7 +514,7 @@ export default function TradeLogTable({
         <EditProtectionModal
           trade={editTrade}
           pnl={pnlByTradeId[editTrade.trade_id]}
-          agentName={editTrade.agent_id ? (agentNameById[editTrade.agent_id] ?? editTrade.agent_id) : "Manual"}
+          agentName={displayAgentName(editTrade)}
           onClose={() => setEditTrade(null)}
           onSaved={afterEdit}
         />
@@ -517,7 +524,7 @@ export default function TradeLogTable({
         <TradeDetailsModal
           trade={detailsTrade}
           pnl={pnlByTradeId[detailsTrade.trade_id]}
-          agentName={detailsTrade.agent_id ? (agentNameById[detailsTrade.agent_id] ?? detailsTrade.agent_id) : "Manual"}
+          agentName={displayAgentName(detailsTrade)}
           onClose={() => setDetailsTrade(null)}
         />
       )}
